@@ -129,7 +129,8 @@ impl App {
                 self.unlock = Unlock::Unknown;
                 self.state.set_matrix_active(false);
             }
-            DeviceEvent::Resumed => {} // a fresh Connected follows
+            // The session is live again; a fresh Connected or Unlocking follows.
+            DeviceEvent::Resumed => self.connection = Connection::Connected,
             DeviceEvent::Connected { info, layout, keymap } => {
                 self.connection = Connection::Connected;
                 self.error = None;
@@ -245,9 +246,18 @@ impl App {
                 ui.heading("Paused");
                 ui.label(format!("{} has the keyboard open. Close it and the assistant reconnects.", holders.join(", ")));
             }
-            Connection::Waiting | Connection::Connected => {
+            Connection::Waiting => {
                 ui.heading("Waiting for Lily58…");
                 ui.label("Plug in the keyboard; it's picked up automatically.");
+            }
+            Connection::Connected => {
+                ui.heading("Reading the keyboard…");
+                let label = if matches!(self.unlock, Unlock::InProgress { .. }) {
+                    "Finish the unlock to see the keyboard picture."
+                } else {
+                    "This takes a moment."
+                };
+                ui.label(label);
             }
         }
     }
@@ -382,6 +392,18 @@ mod tests {
         app.on_device_event(DeviceEvent::Paused { holders: vec!["vial (7)".into()] }, now);
         assert_eq!(app.unlock, Unlock::Unknown, "no unlock window over \"Paused\"");
         assert!(app.unlock_highlight().is_empty());
+    }
+
+    #[test]
+    fn resume_clears_paused_while_an_unlock_is_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        app.on_device_event(DeviceEvent::Paused { holders: vec!["vial (7)".into()] }, now);
+        app.on_device_event(DeviceEvent::Resumed, now);
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        assert_eq!(app.connection, Connection::Connected, "no \"Paused\" once the other program has let go (#9)");
+        assert!(matches!(app.unlock, Unlock::InProgress { .. }));
     }
 
     #[test]

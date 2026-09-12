@@ -30,6 +30,7 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Opening Vial while the assistant runs shows "paused: vial (…) has the keyboard open", and Vial works normally. Closing Vial makes the assistant reconnect.
 - [ ] Remapping a key in Vial, then closing Vial, shows the new label after the reconnect.
 - [ ] Unplugging mid-session goes back to "Waiting…"; replugging reconnects, locked again.
+- [ ] Start an unlock, then open Vial while it's in progress, then close Vial: the status bar no longer says "paused" and the unlock window comes back (#9).
 
 ## Desktops
 - [ ] Fedora/KDE: runs; Alt+F3 → More Actions → Keep Above Others keeps it on top.
