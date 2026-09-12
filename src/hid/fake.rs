@@ -149,6 +149,11 @@ impl KeyboardSim {
         *self.unplugged.lock().unwrap() = true;
     }
 
+    /// Plugs the keyboard back in. Unlike real hardware, its state (e.g. unlocked) carries over.
+    pub fn replug(&self) {
+        *self.unplugged.lock().unwrap() = false;
+    }
+
     pub fn is_unplugged(&self) -> bool {
         *self.unplugged.lock().unwrap()
     }

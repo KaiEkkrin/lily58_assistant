@@ -195,7 +195,10 @@ impl<C: Connector> Worker<C> {
     fn try_connect(&mut self, now: Instant, out: &mut Vec<DeviceEvent>) -> Duration {
         let idle = match self.connector.find() {
             Err(e) => DeviceEvent::Error(format!("scanning for the keyboard failed: {e}")),
-            Ok(None) => DeviceEvent::Waiting,
+            Ok(None) => {
+                self.last_failure = None; // a keyboard plugged in later gets its errors shown
+                DeviceEvent::Waiting
+            }
             Ok(Some(dev)) => {
                 let holders = self.connector.other_holders(&dev);
                 if !holders.is_empty() {
@@ -208,6 +211,12 @@ impl<C: Connector> Worker<C> {
                             Ok(session) => {
                                 self.conn = Conn::Connected(Box::new(session));
                                 return Duration::ZERO;
+                            }
+                            // Unplugged between discovery and the first reply.
+                            Err(e) if e.is_disconnect() => {
+                                log::info!("keyboard went away while connecting: {e}");
+                                self.last_failure = None;
+                                DeviceEvent::Waiting
                             }
                             Err(e) => DeviceEvent::Error(e.to_string()),
                         },
@@ -413,6 +422,8 @@ mod tests {
     struct FakeConnector {
         sim: KeyboardSim,
         deny: bool,
+        /// Unplug the keyboard as it is opened: it vanishes between discovery and the first read.
+        vanish_on_open: bool,
         holders: Arc<Mutex<Vec<String>>>,
     }
 
@@ -430,6 +441,9 @@ mod tests {
         fn open(&mut self, _: &VialDevice) -> io::Result<ReadOnlyGuard<Box<dyn Transport>>> {
             if self.deny {
                 return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            if self.vanish_on_open {
+                self.sim.unplug();
             }
             Ok(ReadOnlyGuard::new(self.sim.transport()).boxed())
         }
@@ -455,7 +469,7 @@ mod tests {
         fn build(sim: KeyboardSim, deny: bool) -> Self {
             let (tx, rx) = mpsc::channel();
             let holders = Arc::new(Mutex::new(Vec::new()));
-            let connector = FakeConnector { sim: sim.clone(), deny, holders: Arc::clone(&holders) };
+            let connector = FakeConnector { sim: sim.clone(), deny, vanish_on_open: false, holders: Arc::clone(&holders) };
             Self { worker: Worker::new(connector, tx, Box::new(|| {})), rx, sim, holders, t0: Instant::now() }
         }
 
@@ -708,5 +722,24 @@ mod tests {
         assert_eq!(n.iter().filter(|&&e| e == "Error").count(), 1, "{n:?}");
         assert!(!n.contains(&"Disconnected"), "{n:?}");
         assert_eq!(wait, RETRY_AFTER_ERROR);
+    }
+
+    #[test]
+    fn keyboard_vanishing_before_the_first_reply_is_not_an_error() {
+        let mut h = Harness::new(KeyboardSim::small());
+        h.worker.connector.vanish_on_open = true;
+        assert_eq!(names(&h.steps(2, 0)), ["Waiting"]);
+    }
+
+    #[test]
+    fn an_identical_error_is_reported_again_after_replug() {
+        let bad_definition = r#"{"matrix":{"rows":2,"cols":3},"layouts":{"keymap":[]}}"#;
+        let sim = KeyboardSim::new(bad_definition, 2, 2, 3, &SMALL_KEYMAP, &[(1, 0), (1, 2)]);
+        let mut h = Harness::new(sim);
+        assert_eq!(names(&h.steps(2, 0)), ["Error"]);
+        h.sim.unplug();
+        assert_eq!(names(&h.steps(1, 5_000)), ["Waiting"]);
+        h.sim.replug();
+        assert_eq!(names(&h.steps(2, 6_000)), ["Error"], "a new keyboard gets its error shown");
     }
 }
