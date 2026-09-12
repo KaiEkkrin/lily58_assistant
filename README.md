@@ -1,5 +1,7 @@
 # Lily58 Assistant
 
+> 🤖 **Vibe coded with [Claude Code](https://claude.com/claude-code).** Claude designed, planned and wrote this; a human steered and tested it on a real keyboard. Expect rough edges, and see the [open issues](https://github.com/KaiEkkrin/lily58_assistant/issues) for the known ones.
+
 An on-screen companion for learning a Lily58 split keyboard running Vial firmware. It draws your keyboard, lights up the keys you press, shows what the last key typed, and follows layer changes as they happen. Everything is read from the keyboard itself.
 
 **Strictly read-only.** The assistant never changes your keymap: every message it sends to the keyboard passes an allowlist of read commands (`src/hid/guard.rs`). The one exception is Vial's two-command unlock handshake, which enables live layer tracking and changes no keymap data. Use [Vial](https://get.vial.today) to remap.

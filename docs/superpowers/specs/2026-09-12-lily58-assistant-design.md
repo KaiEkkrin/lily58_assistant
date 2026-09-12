@@ -1,7 +1,7 @@
 # Lily58 Assistant — Design
 
 Date: 2026-09-12
-Status: Approved in brainstorming; awaiting written-spec review
+Status: Approved; implemented in v1 (see ../../implementation-notes.md for findings since)
 
 ## Purpose
 
