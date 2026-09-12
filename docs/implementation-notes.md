@@ -55,6 +55,21 @@ most of this):
   Tracking now counts as working only when no node is denied
   (`input::evdev::status_for`).
 
+## egui
+
+- **Keys that operate widgets must be removed in `raw_input_hook`.** egui moves focus on
+  Tab in `Memory::begin_pass`, before `App::ui` runs, and a focused button treats Space and
+  Enter as a click. The focused tier copies every event in `App::raw_input_hook`, then removes
+  Tab, Space and Enter key events from what egui sees (#2).
+- On Wayland a key held while the window loses focus never gets its release. egui clears
+  its own `keys_down` on `Event::WindowFocused(false)`, so the app does the same for its
+  focused-tier keys (#1).
+- epaint 0.36's `has_glyph` returns false for anything in its emoji fonts. Check
+  `glyph_width(..) > 0.0` instead. egui draws only its bundled fonts (Ubuntu-Light,
+  NotoEmoji-Regular, emoji-icon-font), so glyph coverage is the same on every desktop.
+- Tests that call `Context::run_ui` must `clear()` the output's `textures_delta`, or
+  epaint panics.
+
 ## Decisions made in review
 
 - `TT(n)` turns on its layer as soon as it is held, like `MO`. The plan had
@@ -66,6 +81,10 @@ most of this):
   and retried every 5 s (`RETRY_AFTER_ERROR`), not every scan.
 - OS key releases are applied even while the matrix tier is active, and OS
   held keys are cleared when the tier changes, so no key stays highlighted.
+- hidraw short writes stay errors: the kernel takes a whole report per `write(2)` or none,
+  so the rest can't be sent as a second write. `EINTR` is retried.
+- `find_vial_device` passes on `read_dir` errors other than NotFound. The worker reports
+  them once, which beats waiting silently.
 
 ## Testing lesson
 
@@ -78,54 +97,24 @@ against the spec's summary of it.
 ## Known issues
 
 All of these are tracked as [GitHub issues](https://github.com/KaiEkkrin/lily58_assistant/issues).
-From the final whole-branch review (not yet fixed):
+The v1.0.1 rollup fixed #1, #2, #3, #7, #8 and #9. Still open:
 
-1. **Keys stick after Alt+Tab** (#1). On Wayland a key held while the window loses
-   focus never gets its release. Fix: on `egui::Event::WindowFocused(false)`,
-   clear focused-source held keys and the shift state.
-2. **Tab, Space and Enter work the app's own buttons** (#2), including the unlock,
-   which can't be cancelled. Fix: remove those key events from egui's input
-   after `focused::translate` has read them, or make the buttons unfocusable.
-3. **Config errors vanish** (#3). The config error goes into the same field as
-   device errors, the first `Connected` clears it, and it is never logged.
-   Fix: a separate `config_error` field plus `log::warn!`.
-4. **Vial may not detect the keyboard while the assistant is unlocked** (#4;
-   not yet checked on hardware). Every program with the hidraw node open receives
-   every reply. The assistant polls the matrix every 10 ms, but checks for
-   other holders only once a second. So Vial's quick identify request can
-   read one of our replies. Remedies range from documenting "close the
+1. **Vial may not detect the keyboard while the assistant is unlocked** (#4; not yet checked on
+   hardware). Every program with the hidraw node open receives every reply. The assistant polls
+   the matrix every 10 ms, but checks for other holders only once a second. So Vial's quick
+   identify request can read one of our replies. Remedies range from documenting "close the
    assistant first" to watching the node with inotify.
 
 Also left for later (#5): add `. "$HOME/.cargo/env"` to the README's Ubuntu steps.
-The manual checklist needs steps for Alt+Tab, Tab/Space in the window, Vial
-detection while unlocked, and TG followed by Reload.
+The manual checklist still needs steps for Vial detection while unlocked, and TG followed by
+Reload.
 
-Minor findings from the per-task reviews, all judged fine to defer
-(#7 device worker, #8 I/O, #9 UI, #10 code and tests):
+Small things from the per-task reviews (#10):
 
-- Device worker: a device vanishing between discovery and the first read is
-  reported as an error, not a disconnect. A leftover unlock yields a
-  duplicate `Unlocked` event. Changes to the list of other programs holding
-  the keyboard aren't re-reported mid-session. After unplug and replug, an
-  identical error stays suppressed and the old one stays on screen. If the
-  worker thread fails to start, the UI gets no events at all. Every unlock
-  poll sends an `Unlocking` event and a repaint, even when the counter hasn't
-  changed.
-- hidraw: an `EINTR` from `poll` shortens the read timeout; a short or
-  interrupted write is treated as a hard error. `find_vial_device` passes on
-  `read_dir` errors other than NotFound.
-- evdev: open failures other than permission denied end up as `NotFound`; the
-  node list sorts as text (`event10` before `event2`).
-- UI: the central panel can show "Paused" while the unlock window is open.
-  The ✔/✖ glyphs are unverified in egui's default fonts. Send errors on the
-  device command channel are ignored.
-- Small things: `protocol::report()` panics without a message on more than
-  32 bytes. `Layout::key()` and `keycodes::basic_name` are linear scans (the
-  latter runs per key per frame). Unparseable slot-0 layout labels are
-  dropped silently. `config_path` is relative when neither `HOME` nor
-  `XDG_CONFIG_HOME` is set. `VialError` has two I/O variants (`Io` and
-  `Guard(Io)`).
+- `protocol::report()` panics without a message on more than 32 bytes. `Layout::key()` and
+  `keycodes::basic_name` are linear scans (the latter runs per key per frame). Unparseable
+  slot-0 layout labels are dropped silently. `config_path` is relative when neither `HOME` nor
+  `XDG_CONFIG_HOME` is set. `VialError` has two I/O variants (`Io` and `Guard(Io)`).
 - Tests: no `LayerTracker` test for `LM(layer, mods)`. The decode tests omit
-  `PersistentDefault`/`TriLayerUpper`. There's no dedicated test that a
-  locked keyboard gets no matrix requests. `fake.rs` holds both the scripted
-  transport and the firmware simulator.
+  `PersistentDefault`/`TriLayerUpper`. There's no dedicated test that a locked keyboard gets
+  no matrix requests. `fake.rs` holds both the scripted transport and the firmware simulator.
