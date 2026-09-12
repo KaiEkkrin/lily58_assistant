@@ -98,3 +98,7 @@ The assistant doesn't do this itself, because Wayland offers no portable way. Us
 ```
 
 Prints the device, permissions, protocol versions, layout, full keymap and unlock state, using only read commands. For logs, run with `RUST_LOG=debug`.
+
+## License
+
+MIT; see [LICENSE.md](LICENSE.md).

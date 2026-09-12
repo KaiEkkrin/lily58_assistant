@@ -3,6 +3,7 @@ name = "lily58-assistant"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+license = "MIT"
 description = "Read-only on-screen companion for learning a Lily58 (Vial) keyboard"
 
 [dependencies]
