@@ -177,8 +177,11 @@ gets highlighted: matrix > unfocused > focused.
 ### Unlock
 
 The **Unlock for layer tracking** button sends `unlock_start` and then polls
-`unlock_poll` every 50 ms. The firmware counts down from 50 at most once per
-100 ms while the keys are held, so an unlock takes about 5 s. The keyboard picture
+`unlock_poll` every 200 ms, as Vial's GUI does. The firmware counts down from 50
+on each poll that arrives more than 100 ms after its last step while the keys are
+held, and restarts the countdown on any other poll (keys released, or a poll
+sooner than 100 ms). So polls must stay over 100 ms apart, and an unlock takes
+about 10 s. The keyboard picture
 highlights the unlock key positions reported by `get_unlock_status`, and a
 window shows the progress.
 
