@@ -26,7 +26,7 @@ most of this):
 - The Vial unlock keys are matrix `(0,0)` + `(0,1)`, the **4 and 5** keys.
 - Layer 3 of the stock keymap has keys `0x7842`–`0x784A`: QMK's RGB Matrix
   controls (`RM_TOGG`, next/previous effect, hue, saturation and brightness
-  up/down). `keycodes.rs` doesn't name them yet, so they show as raw codes.
+  up/down). `keycodes.rs` doesn't name them yet, so they show as raw codes (#6).
 
 ## Firmware behaviour (vial-qmk)
 
@@ -77,29 +77,31 @@ against the spec's summary of it.
 
 ## Known issues
 
+All of these are tracked as [GitHub issues](https://github.com/KaiEkkrin/lily58_assistant/issues).
 From the final whole-branch review (not yet fixed):
 
-1. **Keys stick after Alt+Tab.** On Wayland a key held while the window loses
+1. **Keys stick after Alt+Tab** (#1). On Wayland a key held while the window loses
    focus never gets its release. Fix: on `egui::Event::WindowFocused(false)`,
    clear focused-source held keys and the shift state.
-2. **Tab, Space and Enter work the app's own buttons**, including the unlock,
+2. **Tab, Space and Enter work the app's own buttons** (#2), including the unlock,
    which can't be cancelled. Fix: remove those key events from egui's input
    after `focused::translate` has read them, or make the buttons unfocusable.
-3. **Config errors vanish.** The config error goes into the same field as
+3. **Config errors vanish** (#3). The config error goes into the same field as
    device errors, the first `Connected` clears it, and it is never logged.
    Fix: a separate `config_error` field plus `log::warn!`.
-4. **Vial may not detect the keyboard while the assistant is unlocked** (not
-   yet checked on hardware). Every program with the hidraw node open receives
+4. **Vial may not detect the keyboard while the assistant is unlocked** (#4;
+   not yet checked on hardware). Every program with the hidraw node open receives
    every reply. The assistant polls the matrix every 10 ms, but checks for
    other holders only once a second. So Vial's quick identify request can
    read one of our replies. Remedies range from documenting "close the
    assistant first" to watching the node with inotify.
 
-Also left for later: add `. "$HOME/.cargo/env"` to the README's Ubuntu steps.
+Also left for later (#5): add `. "$HOME/.cargo/env"` to the README's Ubuntu steps.
 The manual checklist needs steps for Alt+Tab, Tab/Space in the window, Vial
 detection while unlocked, and TG followed by Reload.
 
-Minor findings from the per-task reviews, all judged fine to defer:
+Minor findings from the per-task reviews, all judged fine to defer
+(#7 device worker, #8 I/O, #9 UI, #10 code and tests):
 
 - Device worker: a device vanishing between discovery and the first read is
   reported as an error, not a disconnect. A leftover unlock yields a
