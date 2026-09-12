@@ -21,6 +21,8 @@ pub struct VialDevice {
 }
 
 /// First Vial raw-HID interface. `sys_root` is normally `/sys`, `dev_root` `/dev`.
+/// A missing `class/hidraw` means no device. Any other error is passed on on purpose: the
+/// worker reports it once ("scanning for the keyboard failed"), which beats waiting silently.
 pub fn find_vial_device(sys_root: &Path, dev_root: &Path) -> io::Result<Option<VialDevice>> {
     let class = sys_root.join("class/hidraw");
     let mut names: Vec<_> = match fs::read_dir(&class) {
@@ -175,6 +177,14 @@ mod tests {
         assert!(is_vial_raw_interface(&RAW_DESCRIPTOR));
         assert!(!is_vial_raw_interface(&KEYBOARD_DESCRIPTOR));
         assert!(!is_vial_raw_interface(&[0x06, 0x60])); // truncated
+    }
+
+    #[test]
+    fn unreadable_hidraw_class_is_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir_all(t.path().join("class")).unwrap();
+        fs::write(t.path().join("class/hidraw"), "").unwrap(); // a file, so read_dir fails
+        assert!(find_vial_device(t.path(), Path::new("/dev")).is_err());
     }
 
     #[test]

@@ -44,7 +44,10 @@ fn hints_window(ctx: &egui::Context, app: &mut App) {
         }
         let evdev_ok = app.evdev == EvdevStatus::Active;
         ui.label(format!("{} All windows (/dev/input)", mark(evdev_ok)));
-        if !evdev_ok {
+        if let EvdevStatus::Failed(why) = &app.evdev {
+            ui.label(RichText::new(why.as_str()).color(ui.visuals().warn_fg_color));
+            ui.label("Press Reload (Ctrl+R) to try again.");
+        } else if !evdev_ok {
             hint_block(ui, &hints::evdev_hint());
             ui.label("Then press Reload (Ctrl+R).");
         }
