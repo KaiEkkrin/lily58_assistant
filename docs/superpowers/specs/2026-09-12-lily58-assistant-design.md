@@ -45,7 +45,7 @@ with raw HID on usage page `0xFF60`, usage `0x61`, 32-byte reports.
   distro-specific build dependencies to a minimum. The first implementation
   task is a smoke build of a bare eframe window on Fedora, to find out whether
   any `-dev` packages are needed; the README records the result.
-- Minimum compiler is pinned with `rust-version` in `Cargo.toml`. (Fedora's Rust
+- Minimum compiler is pinned with `rust-version = "1.95"` (eframe 0.36.2's minimum) in `Cargo.toml`. (Fedora's Rust
   is distro-packaged, not rustup, so `rust-toolchain.toml` would be ignored.)
   If Ubuntu's packaged Rust is older than that, the README says to install rustup.
 - Other crates: `serde`, `serde_json`, `toml`, `log`, `env_logger`, `thiserror`
@@ -100,7 +100,7 @@ does the same with its key events.
 | `hid::discover` | Find the Vial raw-HID node: scan `/sys/class/hidraw`, match serial containing `vial:f64c2b3c` and report descriptor usage page `0xFF60`/usage `0x61`. Also reports the USB parent path, so evdev can match the same physical device. | std |
 | `hid::transport` | `Transport` trait (send 32-byte report, receive with timeout) plus a `Hidraw` implementation over `/dev/hidrawN`. | std |
 | `hid::guard` | `ReadOnlyGuard`: the only way to reach a `Transport`. Checks every outgoing report against the allowlist and refuses the rest. | `transport` |
-| `vial` | `VialClient`: typed queries (protocol version, keyboard id, definition, layer count, keymap buffer, unlock status, matrix state, unlock start/poll). Matches each reply to its request by the echoed command bytes. | `guard` |
+| `vial` | `VialClient`: typed queries (protocol version, keyboard id, definition, layer count, keymap buffer, unlock status, matrix state, unlock start/poll). VIA replies echo the request and are matched by those bytes; Vial (`0xFE`) replies overwrite the buffer and cannot be matched. | `guard` |
 | `layout` | Parse the Vial definition JSON (KLE layout plus matrix size) into key rectangles, each tagged with matrix `(row, col)`. | serde_json |
 | `keycodes` | Decode QMK 16-bit keycodes into a label and meaning (`KC_A`, `MO(1)`, `LT(2,KC_SPC)`, mod-tap, `TG`, `TO`, `DF`, `OSL`, `TT`, `TL_LOWR`/`TL_UPPR`, …) using QMK's current numbering (Vial protocol v6+). | — |
 | `hostlayout` | Keycode + shift state → character for the host OS layout (`gb` default, `us`). | — |
@@ -111,7 +111,7 @@ does the same with its key events.
 | `hints` | The single source of setup instructions (rule text, commands), used by both the UI and the README. | — |
 | `ui` | Keyboard widget, status bar, hint popups, unlock dialog. | `state`, `hints` |
 | `probe` | `--probe` CLI mode: print diagnostics without the GUI. | `discover`, `vial`, `layout`, `input::evdev` (availability check only) |
-| `config` | Load `$XDG_CONFIG_HOME/lily58-assistant/config.toml` (default `~/.config/...`). v1 key: `host_layout = "gb"`. A missing file means defaults. | toml |
+| `config` | Load `$XDG_CONFIG_HOME/lily58-assistant/config.toml` (default `~/.config/...`). Keys: `host_layout` (`"gb"` default, or `"us"`) and `tri_layer` (default `[1, 2, 3]`; `[]` disables). A missing file means defaults. | toml |
 
 ## Read-only guard
 
@@ -168,29 +168,51 @@ gets highlighted: matrix > unfocused > focused.
 - **Matrix:** each poll's bitmap is compared with the previous one to produce
   press/release events with exact `(row, col)`.
 - **Without matrix:** an OS keycode is mapped to a physical key by finding the
-  key whose keycode on the active layer produces it, falling back to layer 0.
-  The first match in matrix order wins.
+  key whose keycode on the active layer produces it, falling back to layer 0 and
+  then to each other layer, so symbols that exist only on a layer still get a
+  position, shown as "probably layer N". The first match in matrix order wins.
 - While the keyboard is locked, the worker polls unlock status every 2 s,
   so an unlock done elsewhere (e.g. in the Vial GUI) is picked up.
 
 ### Unlock
 
 The **Unlock for layer tracking** button sends `unlock_start` and then polls
-`unlock_poll`. The keyboard picture highlights the unlock key positions
-reported by `get_unlock_status` and shows the handshake's progress counter.
+`unlock_poll` every 50 ms. The firmware counts down from 50 at most once per
+100 ms while the keys are held, so an unlock takes about 5 s. The keyboard picture
+highlights the unlock key positions reported by `get_unlock_status`, and a
+window shows the progress.
+
+Firmware facts (vial-qmk `via.c`/`vial.c`) that shape this:
+
+- Once `unlock_start` is sent, the firmware answers only Vial commands, and
+  **echoes every VIA command back unprocessed**, until the unlock completes or
+  the keyboard loses power. Nothing can cancel an unlock, so the unlock window
+  has no Cancel button and tells the user to unplug to abort (Vial's own dialog
+  works the same way).
+- An unlock may be left in progress by an earlier run. On connect, the worker
+  therefore sends only Vial commands (keyboard id, unlock status). If an unlock
+  is in progress, it resumes the unlock window and reads the keymap only after
+  the unlock completes.
+- While locked, a matrix-state request is echoed back, which reads as "nothing
+  pressed". Matrix polling therefore only runs once `get_unlock_status` says
+  unlocked.
 
 ### Layer tracking (matrix tier only)
 
 `LayerTracker` models QMK's layer state: a default layer (`DF`), toggled layers
 (`TG`, `TO`), and momentary layers from held keys (`MO`; `LT` and `TT` while
 held; `OSL` until the next key press). The active layer is the highest one set.
-`TL_LOWR`/`TL_UPPR` use QMK's tri-layer defaults (lower 1, upper 2, adjust 3).
+`TL_LOWR`/`TL_UPPR` use the tri-layer layers (default lower 1, upper 2, adjust 3).
+The stock Lily58 Vial keymap computes ADJUST in firmware code
+(`update_tri_layer_state(state, _RAISE, _LOWER, _ADJUST)` in `keymap.c`), which
+Vial can't report. The `tri_layer` config key (default `[1, 2, 3]`) therefore
+emulates it: with layers 1 and 2 both active, layer 3 is shown too. `[]` turns
+the emulation off for firmware without it.
 An `LT` key counts as held once another key is pressed while it's down, or it's
 been held for more than 200 ms (QMK's default tapping term).
 
-Known limits, documented in the README: layer logic compiled into the firmware
-(e.g. `update_tri_layer` in `keymap.c`) isn't visible over Vial, and tap/hold
-timing is approximate.
+Known limits, documented in the README: other layer logic compiled into the
+firmware isn't visible over Vial, and tap/hold timing is approximate.
 
 ### Display
 
@@ -271,7 +293,7 @@ effect once the repo is on GitHub.
 3. Permissions: the hidraw rule, the optional `/dev/input` rule with its
    trade-off, how to apply both.
 4. Unlocking for layer tracking.
-5. Configuration (`host_layout`).
+5. Configuration (`host_layout`, `tri_layer`).
 6. Keeping the window on top by hand: KDE, Alt+F3 → More Actions → Keep Above;
    GNOME, Alt+Space → Always on Top.
 7. Known limits (firmware-side layer logic, tap/hold approximation).
