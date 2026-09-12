@@ -50,9 +50,14 @@ pub struct App {
     /// The device worker's channel has closed; reported once.
     worker_stopped: bool,
     show_hints: bool,
-    /// Everything typed into the window this frame, copied in `raw_input_hook` before egui
-    /// sees it.
+    /// Everything typed into the window since the last `logic` call, copied in
+    /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
+    /// eframe calls exactly once per hook call on both the visible and hidden paths.
     typed: Vec<egui::Event>,
+    /// The tail of `raw_input.events` (after our own filtering) already folded into `typed`,
+    /// so a hidden pass that re-hooks the same not-yet-delivered input isn't recorded twice.
+    /// Reset to empty once a real egui pass finally consumes that input (see `raw_input_hook`).
+    typed_seen: Vec<egui::Event>,
     device_rx: Receiver<DeviceEvent>,
     device_tx: Sender<DeviceCommand>,
     input_tx: Sender<InputMsg>,
@@ -104,6 +109,7 @@ impl App {
             worker_stopped: false,
             show_hints: false,
             typed: Vec::new(),
+            typed_seen: Vec::new(),
             device_rx,
             device_tx,
             input_tx,
@@ -267,9 +273,35 @@ impl eframe::App for App {
     /// The focused tier reads everything typed into the window. Tab, Space and Enter would also
     /// move keyboard focus onto the app's buttons and press them, including the unlock, which
     /// can't be cancelled. egui acts on Tab before `ui` runs, so the keys are taken out here.
+    ///
+    /// While the window is minimised/occluded, eframe runs no egui pass at all: it hands this
+    /// hook the same not-yet-delivered `RawInput` again on every pass (growing it with any new
+    /// events in the meantime) instead of a fresh one, so `raw_input.events` isn't reliably just
+    /// "what's new" (see `update_logic_only`/`prepare_raw_input` in eframe's
+    /// `native/epi_integration.rs`). Only the events beyond what `typed_seen` already accounts
+    /// for are genuinely new; a shorter list than `typed_seen` means a real pass finally
+    /// consumed the backlog, so everything here is new again.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        self.typed.extend(raw_input.events.iter().cloned());
+        let new_from = if raw_input.events.starts_with(&self.typed_seen) { self.typed_seen.len() } else { 0 };
+        self.typed.extend(raw_input.events[new_from..].iter().cloned());
         raw_input.events.retain(|e| !focused::operates_widgets(e));
+        self.typed_seen.clone_from(&raw_input.events);
+    }
+
+    /// Called once right after `raw_input_hook`, on both the visible path (before `ui`) and the
+    /// hidden one (instead of it), so this is where `typed` must be drained: `ui` only runs
+    /// while the window is visible, which is exactly when the duplication in `raw_input_hook`'s
+    /// doc comment would otherwise pile up unseen.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = Instant::now();
+        for input in focused::translate(&std::mem::take(&mut self.typed)) {
+            match input {
+                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
+                FocusedInput::Key(_) => {} // evdev already reported it
+                FocusedInput::Text(text) => self.state.on_text(&text),
+                FocusedInput::FocusLost => self.state.release_focused_keys(),
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -282,14 +314,6 @@ impl eframe::App for App {
                     self.evdev = EvdevStatus::NotFound;
                     self.state.evdev_active = false;
                 }
-            }
-        }
-        for input in focused::translate(&std::mem::take(&mut self.typed)) {
-            match input {
-                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
-                FocusedInput::Key(_) => {} // evdev already reported it
-                FocusedInput::Text(text) => self.state.on_text(&text),
-                FocusedInput::FocusLost => self.state.release_focused_keys(),
             }
         }
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
@@ -381,6 +405,31 @@ mod tests {
         }
         assert_eq!(clicks, 0);
         assert_eq!(typed, vec![key(egui::Key::Tab), key(egui::Key::Space), key(egui::Key::Enter)]);
+    }
+
+    /// While the window is minimised/occluded, eframe runs no egui pass at all: it re-hooks the
+    /// same not-yet-delivered `RawInput` on every pass (growing it with any new events), instead
+    /// of handing the hook a fresh one each time. `typed` must still see each event once.
+    #[test]
+    fn hidden_passes_do_not_duplicate_typed_events() {
+        let (mut app, _events, _commands) = app(None);
+        let ctx = egui::Context::default();
+        let a = egui::Event::Text("a".into());
+        let mut raw = egui::RawInput { events: vec![a.clone()], ..Default::default() };
+
+        // First hidden pass.
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a.clone()]);
+
+        // Second hidden pass: nothing consumed `raw`, so eframe hooks the same events again.
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a.clone()], "the event must not be recorded twice");
+
+        // A genuinely new event arriving on a later hidden pass is still captured, once.
+        let b = egui::Event::Text("b".into());
+        raw.events.push(b.clone());
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a, b]);
     }
 
     #[test]
