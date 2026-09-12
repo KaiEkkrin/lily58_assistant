@@ -41,6 +41,8 @@ pub struct App {
     evdev: EvdevStatus,
     evdev_usb_dir: Option<PathBuf>,
     error: Option<String>,
+    /// Kept apart from `error`, which device events clear; this stays until dismissed.
+    config_error: Option<String>,
     show_hints: bool,
     device_rx: Receiver<DeviceEvent>,
     device_tx: Sender<DeviceCommand>,
@@ -63,15 +65,23 @@ pub fn run() -> eframe::Result {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (config, error) = match Config::load_from(&config::config_path()) {
-            Ok(config) => (config, None),
-            Err(e) => (Config::default(), Some(format!("Config ignored: {e}"))),
-        };
-        let (tri, always_tri) = config.tri();
+        let (config, config_error) = config::load_or_default(&config::config_path());
         let ctx = cc.egui_ctx.clone();
         let (events_tx, device_rx) = mpsc::channel();
         let repaint = ctx.clone();
         let device_tx = device::spawn(SystemConnector, events_tx, move || repaint.request_repaint());
+        Self::with_device(&config, config_error, ctx, device_tx, device_rx)
+    }
+
+    /// Everything but starting the device worker, so tests can stand in for it with channels.
+    fn with_device(
+        config: &Config,
+        config_error: Option<String>,
+        ctx: egui::Context,
+        device_tx: Sender<DeviceCommand>,
+        device_rx: Receiver<DeviceEvent>,
+    ) -> Self {
+        let (tri, always_tri) = config.tri();
         let (input_tx, input_rx) = mpsc::channel();
         Self {
             state: AppState::new(config.host_layout, tri, always_tri),
@@ -80,7 +90,8 @@ impl App {
             unlock_keys: Vec::new(),
             evdev: EvdevStatus::NotFound,
             evdev_usb_dir: None,
-            error,
+            error: None,
+            config_error,
             show_hints: false,
             device_rx,
             device_tx,
@@ -221,5 +232,46 @@ impl eframe::App for App {
 
         // Tap-hold keys become holds after the tapping term with no new input, so keep repainting.
         ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceInfo;
+    use crate::hid::fake::{SMALL_DEFINITION, SMALL_KEYMAP};
+    use crate::keymap::Keymap;
+    use crate::layout::Layout;
+
+    /// An `App` wired to channels instead of a device worker.
+    fn app(config_error: Option<&str>) -> (App, Sender<DeviceEvent>, Receiver<DeviceCommand>) {
+        let (events_tx, device_rx) = mpsc::channel();
+        let (device_tx, commands_rx) = mpsc::channel();
+        let app =
+            App::with_device(&Config::default(), config_error.map(String::from), egui::Context::default(), device_tx, device_rx);
+        (app, events_tx, commands_rx)
+    }
+
+    /// `Connected` for the 2x3 test keyboard. Its `usb_dir` matches no real device, so no evdev reader starts.
+    fn connected() -> DeviceEvent {
+        let layout = Layout::from_definition(&serde_json::from_str(SMALL_DEFINITION).unwrap()).unwrap();
+        let buf: Vec<u8> = SMALL_KEYMAP.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let info = DeviceInfo {
+            dev_node: "/dev/hidraw99".into(),
+            usb_dir: "/nonexistent/usb".into(),
+            product: "Sim58".into(),
+            via_protocol: 12,
+            vial_protocol: 6,
+        };
+        DeviceEvent::Connected { info, layout, keymap: Keymap::from_buffer(2, 2, 3, &buf).unwrap() }
+    }
+
+    #[test]
+    fn config_error_outlives_device_events() {
+        let (mut app, _events, _commands) = app(Some("Config ignored, using defaults: bad"));
+        app.on_device_event(DeviceEvent::Error("boom".into()), Instant::now());
+        app.on_device_event(connected(), Instant::now());
+        assert_eq!(app.error, None, "Connected clears device errors");
+        assert_eq!(app.config_error.as_deref(), Some("Config ignored, using defaults: bad"));
     }
 }

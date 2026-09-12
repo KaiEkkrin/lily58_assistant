@@ -45,6 +45,16 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
     if let Some(err) = &app.error {
         ui.colored_label(Color32::from_rgb(230, 90, 90), err);
     }
+    let mut dismissed = false;
+    if let Some(err) = &app.config_error {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(Color32::from_rgb(230, 180, 40), err);
+            dismissed = ui.small_button("Dismiss").clicked();
+        });
+    }
+    if dismissed {
+        app.config_error = None;
+    }
 }
 
 fn visible(text: &str) -> String {

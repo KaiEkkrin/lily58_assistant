@@ -57,6 +57,18 @@ pub fn config_path() -> PathBuf {
     base.join("lily58-assistant/config.toml")
 }
 
+/// Loads the config, falling back to defaults if it is unreadable or invalid. The error is
+/// logged and returned so the UI can show it until dismissed.
+pub fn load_or_default(path: &Path) -> (Config, Option<String>) {
+    match Config::load_from(path) {
+        Ok(config) => (config, None),
+        Err(e) => {
+            log::warn!("config ignored, using defaults: {e}");
+            (Config::default(), Some(format!("Config ignored, using defaults: {e}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +99,18 @@ mod tests {
     #[test]
     fn missing_file_means_defaults() {
         assert_eq!(Config::load_from(Path::new("/nonexistent/lily58-assistant.toml")).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn invalid_file_means_defaults_and_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "host_layout = \"fr\"\n").unwrap();
+        let (config, error) = load_or_default(&path);
+        assert_eq!(config, Config::default());
+        let error = error.expect("an error message");
+        assert!(error.starts_with("Config ignored, using defaults: "), "{error}");
+        assert!(error.contains("config.toml"), "{error}");
+        assert_eq!(load_or_default(Path::new("/nonexistent/lily58-assistant.toml")), (Config::default(), None));
     }
 }
