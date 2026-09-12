@@ -11,6 +11,7 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Typing into the window highlights the right keys; the status bar shows e.g. `KC_QUOT  →  '`.
 - [ ] Shift+2 shows `"` and Shift+3 shows `£` (UK layout).
 - [ ] Typing in another window changes nothing.
+- [ ] Hold Shift, Alt+Tab to another window, release both there, then come back: no key stays highlighted, and typing 3 shows `3`, not `£` (#1).
 
 ## All windows (evdev rule installed)
 - [ ] After installing the rule and pressing Reload, the status bar says "all windows, no layer tracking".

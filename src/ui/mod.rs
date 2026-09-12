@@ -220,6 +220,7 @@ impl eframe::App for App {
                 FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
                 FocusedInput::Key(_) => {} // evdev already reported it
                 FocusedInput::Text(text) => self.state.on_text(&text),
+                FocusedInput::FocusLost => self.state.release_focused_keys(),
             }
         }
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
