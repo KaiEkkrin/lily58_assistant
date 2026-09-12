@@ -102,7 +102,10 @@ struct Session {
     rows: u8,
     cols: u8,
     matrix: MatrixState,
-    paused: bool,
+    /// Other programs holding the device, as last reported; non-empty means paused.
+    holders: Vec<String>,
+    /// The unlock counter last sent to the UI, so a poll that finds it unchanged sends nothing.
+    unlock_counter_sent: Option<u8>,
     next_holder_check: Instant,
     next_lock_check: Instant,
     /// Unlock polls must stay `UNLOCK_POLL_INTERVAL` apart even when a command wakes the
@@ -166,7 +169,7 @@ impl<C: Connector> Worker<C> {
                 s.loaded = false; // the next step re-reads layout and keymap
                 Ok(())
             }
-            DeviceCommand::StartUnlock if s.lock == Lock::Locked && !s.paused => {
+            DeviceCommand::StartUnlock if s.lock == Lock::Locked && s.holders.is_empty() => {
                 let started = s.client.unlock_start();
                 if started.is_ok() {
                     s.lock = Lock::Unlocking;
@@ -283,7 +286,8 @@ fn start_session(dev: VialDevice, guard: ReadOnlyGuard<Box<dyn Transport>>, now:
         rows: 0,
         cols: 0,
         matrix: MatrixState::empty(0, 0),
-        paused: false,
+        holders: Vec::new(),
+        unlock_counter_sent: None,
         next_holder_check: now,
         next_lock_check: now + LOCKED_CHECK_INTERVAL,
         next_unlock_poll: now,
@@ -295,23 +299,27 @@ fn poll<C: Connector>(s: &mut Session, connector: &mut C, now: Instant, out: &mu
     if now >= s.next_holder_check {
         s.next_holder_check = now + HOLDER_CHECK_INTERVAL;
         let holders = connector.other_holders(&s.dev);
-        if !holders.is_empty() && !s.paused {
-            s.paused = true;
-            out.push(DeviceEvent::Paused { holders });
-        } else if holders.is_empty() && s.paused {
-            s.paused = false;
-            // The other program may have locked, unlocked, or changed the keymap while it
-            // held the device: re-read the lock state before anything else runs, so the
-            // Unlocking branch below sees it and no VIA read is sent to a keyboard that
-            // is mid-handshake or newly locked.
-            let status = s.client.unlock_status()?;
-            s.unlock_keys = status.keys;
-            s.lock = lock_from_status(status.unlocked, status.in_progress);
-            s.loaded = false;
-            out.push(DeviceEvent::Resumed);
+        if holders != s.holders {
+            s.holders = holders;
+            if !s.holders.is_empty() {
+                // Sent again whenever the set of other programs changes while paused.
+                out.push(DeviceEvent::Paused { holders: s.holders.clone() });
+            } else {
+                // The other program may have locked, unlocked, or changed the keymap while it
+                // held the device: re-read the lock state before anything else runs, so the
+                // Unlocking branch below sees it and no VIA read is sent to a keyboard that
+                // is mid-handshake or newly locked.
+                let status = s.client.unlock_status()?;
+                s.unlock_keys = status.keys;
+                s.lock = lock_from_status(status.unlocked, status.in_progress);
+                s.loaded = false;
+                // The UI forgot the unlock state when it saw `Paused`, so send progress afresh.
+                s.unlock_counter_sent = None;
+                out.push(DeviceEvent::Resumed);
+            }
         }
     }
-    if s.paused {
+    if !s.holders.is_empty() {
         return Ok(HOLDER_CHECK_INTERVAL);
     }
 
@@ -322,11 +330,18 @@ fn poll<C: Connector>(s: &mut Session, connector: &mut C, now: Instant, out: &mu
         s.next_unlock_poll = now + UNLOCK_POLL_INTERVAL;
         let p = s.client.unlock_poll()?;
         if !p.unlocked {
-            out.push(DeviceEvent::Unlocking { counter: p.counter, unlock_keys: s.unlock_keys.clone() });
+            if s.unlock_counter_sent != Some(p.counter) {
+                s.unlock_counter_sent = Some(p.counter);
+                out.push(DeviceEvent::Unlocking { counter: p.counter, unlock_keys: s.unlock_keys.clone() });
+            }
             return Ok(UNLOCK_POLL_INTERVAL);
         }
         s.lock = Lock::Unlocked;
-        out.push(DeviceEvent::Unlocked);
+        s.unlock_counter_sent = None;
+        // Before the first load, `load()` below sends `Unlocked` along with `Connected`.
+        if s.loaded {
+            out.push(DeviceEvent::Unlocked);
+        }
     }
 
     if !s.loaded {
@@ -580,7 +595,8 @@ mod tests {
         h.worker.handle(DeviceCommand::Reload);
         assert!(h.steps(3, 50).is_empty());
         assert_eq!(h.sim.with(|s| s.requests), before, "no unlock poll within the interval");
-        assert_eq!(names(&h.steps(1, UNLOCK_POLL_INTERVAL.as_millis() as u64)), ["Unlocking"]);
+        assert!(h.steps(1, UNLOCK_POLL_INTERVAL.as_millis() as u64).is_empty(), "counter unchanged: nothing to send");
+        assert_eq!(h.sim.with(|s| s.requests), before + 1, "one unlock poll once the interval has passed");
     }
 
     #[test]
@@ -594,10 +610,10 @@ mod tests {
         let mut h = Harness::new(sim);
         let events = h.run(0, 12_000);
         let n = names(&events);
-        let unlocked = n.iter().position(|&e| e == "Unlocked").expect("unlocked");
         let connected = n.iter().position(|&e| e == "Connected").expect("connected");
-        assert!(n[..unlocked].iter().all(|&e| e == "Unlocking"));
-        assert!(connected > unlocked);
+        assert!(n[..connected].iter().all(|&e| e == "Unlocking"), "{n:?}");
+        assert_eq!(n[connected + 1], "Unlocked", "{n:?}");
+        assert_eq!(n.iter().filter(|&&e| e == "Unlocked").count(), 1, "{n:?}");
         let DeviceEvent::Connected { keymap, .. } = &events[connected] else { unreachable!() };
         assert_eq!(keymap.get(0, 0, 0), 0x0004, "keymap must be read after the unlock, not as echoed zeros");
     }
@@ -696,10 +712,10 @@ mod tests {
         let events = h.run(2000, 14_000);
         let n = names(&events);
         assert!(!n.contains(&"Error"), "{n:?}");
-        let unlocked = n.iter().position(|&e| e == "Unlocked").expect("unlocked");
         let connected = n.iter().position(|&e| e == "Connected").expect("connected");
-        assert!(n[..unlocked].iter().all(|&e| e == "Resumed" || e == "Unlocking"), "{n:?}");
-        assert!(connected > unlocked);
+        assert!(n[..connected].iter().all(|&e| e == "Resumed" || e == "Unlocking"), "{n:?}");
+        assert_eq!(n[connected + 1], "Unlocked", "{n:?}");
+        assert_eq!(n.iter().filter(|&&e| e == "Unlocked").count(), 1, "{n:?}");
         let DeviceEvent::Connected { keymap, .. } = &events[connected] else { unreachable!() };
         assert_eq!(keymap.get(0, 0, 0), 0x0004, "keymap must be read after the unlock completes");
     }
@@ -741,5 +757,42 @@ mod tests {
         assert_eq!(names(&h.steps(1, 5_000)), ["Waiting"]);
         h.sim.replug();
         assert_eq!(names(&h.steps(2, 6_000)), ["Error"], "a new keyboard gets its error shown");
+    }
+
+    #[test]
+    fn a_change_of_holders_while_paused_is_reported() {
+        let mut h = Harness::new(KeyboardSim::small());
+        h.steps(2, 0);
+        *h.holders.lock().unwrap() = vec!["vial (4242)".into()];
+        assert_eq!(h.steps(1, 1000), vec![DeviceEvent::Paused { holders: vec!["vial (4242)".into()] }]);
+        *h.holders.lock().unwrap() = vec!["vial (4242)".into(), "vial (4343)".into()];
+        assert_eq!(h.steps(1, 2000), vec![DeviceEvent::Paused { holders: vec!["vial (4242)".into(), "vial (4343)".into()] }]);
+        assert!(h.steps(1, 3000).is_empty(), "unchanged holders are not re-sent");
+    }
+
+    #[test]
+    fn unlock_progress_is_sent_only_when_it_moves() {
+        let mut h = Harness::new(KeyboardSim::small());
+        h.steps(2, 0);
+        h.worker.handle(DeviceCommand::StartUnlock);
+        assert_eq!(names(&h.steps(1, 0)), ["Unlocking"]); // counter 50: keys not held
+        let before = h.sim.with(|s| s.requests);
+        assert!(h.steps(1, 200).is_empty(), "still 50: nothing new to show");
+        assert_eq!(h.sim.with(|s| s.requests), before + 1, "but it did poll");
+        h.sim.with(|s| s.matrix[1] = 0b101); // the user holds both unlock keys
+        assert_eq!(h.steps(1, 400), vec![DeviceEvent::Unlocking { counter: 49, unlock_keys: vec![(1, 0), (1, 2)] }]);
+    }
+
+    #[test]
+    fn unlock_progress_is_sent_again_after_a_pause() {
+        let mut h = Harness::new(KeyboardSim::small());
+        h.steps(2, 0);
+        h.worker.handle(DeviceCommand::StartUnlock);
+        assert_eq!(names(&h.steps(1, 0)), ["Unlocking"]);
+        *h.holders.lock().unwrap() = vec!["vial (7)".into()];
+        assert_eq!(names(&h.steps(1, 1000)), ["Paused"]);
+        h.holders.lock().unwrap().clear();
+        // The UI forgot the unlock when it saw Paused, so the unchanged counter is sent again.
+        assert_eq!(names(&h.steps(1, 2000)), ["Resumed", "Unlocking"]);
     }
 }
