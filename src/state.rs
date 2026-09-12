@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
 use crate::hostlayout::HostLayout;
-use crate::input::OsKey;
+use crate::input::{OsKey, OsSource};
 use crate::keycodes::{self, Action};
 use crate::keymap::Keymap;
 use crate::layers::{LayerTracker, TriLayer};
@@ -48,8 +48,8 @@ pub struct AppState {
     host: HostLayout,
     tracker: LayerTracker,
     matrix_held: BTreeSet<(u8, u8)>,
-    /// OS keys currently down (by `OsKey::name`) and where we placed them.
-    os_held: HashMap<String, Option<(u8, u8)>>,
+    /// OS keys currently down (by source and `OsKey::name`) and where we placed them.
+    os_held: HashMap<(OsSource, String), Option<(u8, u8)>>,
     os_shift: bool,
 }
 
@@ -152,8 +152,9 @@ impl AppState {
         if key.usages.iter().any(|&u| u == 0xE1 || u == 0xE5) {
             self.os_shift = key.pressed;
         }
+        let held = (key.source, key.name.clone());
         if !key.pressed {
-            self.os_held.remove(&key.name);
+            self.os_held.remove(&held);
             return;
         }
         if self.matrix_active {
@@ -161,7 +162,7 @@ impl AppState {
         }
         let mask = self.layer_mask(now);
         let hit = self.keymap.as_ref().and_then(|km| km.find_position(mask, &key.usages));
-        self.os_held.insert(key.name.clone(), hit.map(|h| (h.row, h.col)));
+        self.os_held.insert(held, hit.map(|h| (h.row, h.col)));
         self.last = Some(match hit {
             Some(h) => self.describe(h.code, h.layer, Some((h.row, h.col)), self.os_shift, true),
             None => {
@@ -181,6 +182,15 @@ impl AppState {
     pub fn on_text(&mut self, text: &str) {
         if let Some(last) = &mut self.last {
             last.text = Some(text.to_owned());
+        }
+    }
+
+    /// The window lost focus (e.g. Alt+Tab). On Wayland it never sees the release of a key held
+    /// at that moment, so forget the keys it saw go down, and the shift state if it came from them.
+    pub fn release_focused_keys(&mut self) {
+        self.os_held.retain(|(source, _), _| *source != OsSource::Focused);
+        if !self.evdev_active {
+            self.os_shift = false; // the UI feeds focused keys to `os_key` only while evdev is off
         }
     }
 
@@ -322,5 +332,34 @@ mod tests {
         s.os_key(&os("evdev 42", &[0xE1], true), now);
         s.matrix_changed(&[(0, 0)], &[], now);
         assert_eq!(s.last.as_ref().unwrap().text.as_deref(), Some("A"));
+    }
+
+    fn focused(name: &str, usages: &[u8], pressed: bool) -> OsKey {
+        OsKey { source: OsSource::Focused, usages: usages.to_vec(), pressed, name: name.into() }
+    }
+
+    #[test]
+    fn focus_loss_forgets_keys_held_in_the_window() {
+        let mut s = state();
+        let now = Instant::now();
+        s.os_key(&focused("ShiftLeft", &[0xE1], true), now); // LSFT is at (1,2)
+        s.os_key(&focused("B", &[0x05], true), now);
+        assert_eq!(s.held_positions(), BTreeSet::from([(0, 1), (1, 2)]));
+        s.release_focused_keys(); // Alt+Tab: the releases never arrive
+        assert!(s.held_positions().is_empty());
+        s.os_key(&focused("Num3", &[0x20], true), now);
+        assert_eq!(s.last.as_ref().unwrap().text.as_deref(), Some("3"), "shift is no longer held");
+    }
+
+    #[test]
+    fn focus_loss_keeps_keys_seen_by_evdev() {
+        let mut s = state();
+        s.evdev_active = true;
+        let now = Instant::now();
+        s.os_key(&os("evdev 42", &[0xE1], true), now);
+        s.release_focused_keys();
+        assert_eq!(s.held_positions(), BTreeSet::from([(1, 2)]));
+        s.os_key(&os("evdev 4", &[0x20], true), now);
+        assert_eq!(s.last.as_ref().unwrap().text.as_deref(), Some("£"), "evdev still has shift down");
     }
 }

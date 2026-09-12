@@ -15,8 +15,10 @@ use crate::hidmap::evdev_to_hid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvdevStatus {
     Active,
-    /// Nodes exist but none could be opened (no udev rule yet).
+    /// Nodes exist but some could not be opened (no udev rule yet).
     NoAccess(Vec<PathBuf>),
+    /// Some node failed to open for another reason; the message says why.
+    Failed(String),
     NotFound,
 }
 
@@ -31,21 +33,29 @@ pub fn find_event_nodes(sys_root: &Path, dev_root: &Path, usb_dir: &Path) -> Vec
         })
         .map(|e| dev_root.join("input").join(e.file_name()))
         .collect();
-    nodes.sort();
+    nodes.sort_by_key(|node| event_number(node));
     nodes
 }
 
-/// Opens every node and, only if none was denied, spawns one reader thread per node.
+/// `N` of an `eventN` node, so `event2` sorts before `event10`.
+fn event_number(node: &Path) -> Option<u32> {
+    node.file_name()?.to_str()?.strip_prefix("event")?.parse().ok()
+}
+
+/// Opens every node and, only if all of them opened, spawns one reader thread per node.
 pub fn start(nodes: &[PathBuf], tx: Sender<InputMsg>, notify: impl Fn() + Send + Clone + 'static) -> EvdevStatus {
-    let (mut opened, mut denied) = (Vec::new(), Vec::new());
+    let (mut opened, mut denied, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for node in nodes {
         match Device::open(node) {
             Ok(dev) => opened.push((node.clone(), dev)),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => denied.push(node.clone()),
-            Err(e) => log::warn!("cannot open {}: {e}", node.display()),
+            Err(e) => {
+                log::warn!("cannot open {}: {e}", node.display());
+                failed.push(format!("cannot open {}: {e}", node.display()));
+            }
         }
     }
-    let status = status_for(opened.len(), denied);
+    let status = status_for(opened.len(), denied, failed);
     if status == EvdevStatus::Active {
         for (node, dev) in opened {
             spawn_reader(node, dev, tx.clone(), notify.clone());
@@ -56,10 +66,12 @@ pub fn start(nodes: &[PathBuf], tx: Sender<InputMsg>, notify: impl Fn() + Send +
 
 /// Some of the keyboard's nodes can be readable without the udev rule (systemd gives the
 /// seat user its joystick nodes), and those carry no key events. So tracking counts as
-/// active only when no node was denied.
-fn status_for(opened: usize, denied: Vec<PathBuf>) -> EvdevStatus {
+/// active only when every node opened.
+fn status_for(opened: usize, denied: Vec<PathBuf>, failed: Vec<String>) -> EvdevStatus {
     if !denied.is_empty() {
         EvdevStatus::NoAccess(denied)
+    } else if !failed.is_empty() {
+        EvdevStatus::Failed(failed.join("; "))
     } else if opened > 0 {
         EvdevStatus::Active
     } else {
@@ -137,15 +149,44 @@ mod tests {
         // The Lily58's joystick node is world-readable (systemd's uaccess rule for joysticks),
         // but its keyboard node is not: that's no all-windows tracking.
         let kbd = PathBuf::from("/dev/input/event259");
-        assert_eq!(status_for(1, vec![kbd.clone()]), EvdevStatus::NoAccess(vec![kbd]));
-        assert_eq!(status_for(4, vec![]), EvdevStatus::Active);
-        assert_eq!(status_for(0, vec![]), EvdevStatus::NotFound);
+        assert_eq!(status_for(1, vec![kbd.clone()], vec![]), EvdevStatus::NoAccess(vec![kbd]));
+        assert_eq!(status_for(4, vec![], vec![]), EvdevStatus::Active);
+        assert_eq!(status_for(0, vec![], vec![]), EvdevStatus::NotFound);
     }
 
     #[test]
     fn no_nodes_means_not_found() {
         let (tx, _rx) = std::sync::mpsc::channel();
         assert_eq!(start(&[], tx, || {}), EvdevStatus::NotFound);
+    }
+
+    #[test]
+    fn a_node_that_fails_to_open_is_reported_not_hidden() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let status = start(&[PathBuf::from("/nonexistent/event0")], tx, || {});
+        assert!(matches!(&status, EvdevStatus::Failed(m) if m.contains("/nonexistent/event0")), "{status:?}");
+        // Like a denied node, a failed one means no all-windows tracking even if another opened.
+        let why = "cannot open /dev/input/event9: No such device".to_string();
+        assert_eq!(status_for(1, vec![], vec![why.clone()]), EvdevStatus::Failed(why));
+    }
+
+    #[test]
+    fn event_nodes_are_in_numeric_order() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let usb = root.join("devices/usb1/1-3");
+        fs::create_dir_all(&usb).unwrap();
+        fs::write(usb.join("idVendor"), "7171\n").unwrap();
+        for (i, name) in ["event10", "event2", "event9"].iter().enumerate() {
+            let input_dir = usb.join(format!("1-3:1.{i}/input/input{i}"));
+            fs::create_dir_all(&input_dir).unwrap();
+            let class_dir = root.join("class/input").join(name);
+            fs::create_dir_all(&class_dir).unwrap();
+            symlink(&input_dir, class_dir.join("device")).unwrap();
+        }
+        let nodes = find_event_nodes(root, Path::new("/dev"), &fs::canonicalize(&usb).unwrap());
+        let names: Vec<_> = nodes.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["event2", "event9", "event10"]);
     }
 
     #[test]

@@ -5,7 +5,7 @@ pub mod keyboard;
 mod status;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -33,6 +33,10 @@ enum Unlock {
     Unlocked,
 }
 
+/// Shown when the device worker has stopped (it panicked, or its thread never started).
+const DEVICE_WORKER_STOPPED: &str =
+    "The keyboard worker has stopped, so the keyboard can't be read. Restart the assistant; the log says why.";
+
 pub struct App {
     state: AppState,
     connection: Connection,
@@ -41,7 +45,19 @@ pub struct App {
     evdev: EvdevStatus,
     evdev_usb_dir: Option<PathBuf>,
     error: Option<String>,
+    /// Kept apart from `error`, which device events clear; this stays until dismissed.
+    config_error: Option<String>,
+    /// The device worker's channel has closed; reported once.
+    worker_stopped: bool,
     show_hints: bool,
+    /// Everything typed into the window since the last `logic` call, copied in
+    /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
+    /// eframe calls exactly once per hook call on both the visible and hidden paths.
+    typed: Vec<egui::Event>,
+    /// The tail of `raw_input.events` (after our own filtering) already folded into `typed`,
+    /// so a hidden pass that re-hooks the same not-yet-delivered input isn't recorded twice.
+    /// Reset to empty once a real egui pass finally consumes that input (see `raw_input_hook`).
+    typed_seen: Vec<egui::Event>,
     device_rx: Receiver<DeviceEvent>,
     device_tx: Sender<DeviceCommand>,
     input_tx: Sender<InputMsg>,
@@ -63,15 +79,23 @@ pub fn run() -> eframe::Result {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (config, error) = match Config::load_from(&config::config_path()) {
-            Ok(config) => (config, None),
-            Err(e) => (Config::default(), Some(format!("Config ignored: {e}"))),
-        };
-        let (tri, always_tri) = config.tri();
+        let (config, config_error) = config::load_or_default(&config::config_path());
         let ctx = cc.egui_ctx.clone();
         let (events_tx, device_rx) = mpsc::channel();
         let repaint = ctx.clone();
         let device_tx = device::spawn(SystemConnector, events_tx, move || repaint.request_repaint());
+        Self::with_device(&config, config_error, ctx, device_tx, device_rx)
+    }
+
+    /// Everything but starting the device worker, so tests can stand in for it with channels.
+    fn with_device(
+        config: &Config,
+        config_error: Option<String>,
+        ctx: egui::Context,
+        device_tx: Sender<DeviceCommand>,
+        device_rx: Receiver<DeviceEvent>,
+    ) -> Self {
+        let (tri, always_tri) = config.tri();
         let (input_tx, input_rx) = mpsc::channel();
         Self {
             state: AppState::new(config.host_layout, tri, always_tri),
@@ -80,8 +104,12 @@ impl App {
             unlock_keys: Vec::new(),
             evdev: EvdevStatus::NotFound,
             evdev_usb_dir: None,
-            error,
+            error: None,
+            config_error,
+            worker_stopped: false,
             show_hints: false,
+            typed: Vec::new(),
+            typed_seen: Vec::new(),
             device_rx,
             device_tx,
             input_tx,
@@ -92,13 +120,23 @@ impl App {
 
     fn on_device_event(&mut self, event: DeviceEvent, now: Instant) {
         match event {
-            DeviceEvent::Waiting => self.connection = Connection::Waiting,
-            DeviceEvent::NoAccess(path) => self.connection = Connection::NoAccess(path),
+            DeviceEvent::Waiting => {
+                self.connection = Connection::Waiting;
+                self.unlock = Unlock::Unknown;
+                self.error = None; // no keyboard, so any error about it is stale
+            }
+            DeviceEvent::NoAccess(path) => {
+                self.connection = Connection::NoAccess(path);
+                self.unlock = Unlock::Unknown;
+            }
             DeviceEvent::Paused { holders } => {
                 self.connection = Connection::Paused(holders);
+                // The other program may lock, unlock or finish an unlock; a resume re-reports it.
+                self.unlock = Unlock::Unknown;
                 self.state.set_matrix_active(false);
             }
-            DeviceEvent::Resumed => {} // a fresh Connected follows
+            // The session is live again; a fresh Connected or Unlocking follows.
+            DeviceEvent::Resumed => self.connection = Connection::Connected,
             DeviceEvent::Connected { info, layout, keymap } => {
                 self.connection = Connection::Connected;
                 self.error = None;
@@ -128,7 +166,41 @@ impl App {
                 self.state.set_matrix_active(true);
             }
             DeviceEvent::Matrix { pressed, released } => self.state.matrix_changed(&pressed, &released, now),
-            DeviceEvent::Error(e) => self.error = Some(e),
+            DeviceEvent::Error(e) => {
+                self.error = Some(e);
+                self.unlock = Unlock::Unknown; // errors come only when there is no session
+            }
+        }
+    }
+
+    fn drain_device_events(&mut self, now: Instant) {
+        loop {
+            match self.device_rx.try_recv() {
+                Ok(event) => self.on_device_event(event, now),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.on_worker_stopped();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The device worker's end of the channels is gone. Nothing about the keyboard will change
+    /// again, so clear it and say so.
+    fn on_worker_stopped(&mut self) {
+        if self.worker_stopped {
+            return;
+        }
+        self.worker_stopped = true;
+        log::error!("the device worker has stopped");
+        self.on_device_event(DeviceEvent::Disconnected, Instant::now());
+        self.error = Some(DEVICE_WORKER_STOPPED.into());
+    }
+
+    fn send(&mut self, cmd: DeviceCommand) {
+        if self.device_tx.send(cmd).is_err() {
+            self.on_worker_stopped();
         }
     }
 
@@ -143,7 +215,7 @@ impl App {
     /// Re-reads the keymap and, if all-windows tracking isn't running yet, retries it
     /// (e.g. just after installing the udev rule).
     fn reload(&mut self) {
-        let _ = self.device_tx.send(DeviceCommand::Reload);
+        self.send(DeviceCommand::Reload);
         self.state.reset_tracking();
         if self.evdev != EvdevStatus::Active
             && let Some(dir) = self.evdev_usb_dir.clone()
@@ -153,7 +225,7 @@ impl App {
     }
 
     fn start_unlock(&mut self) {
-        let _ = self.device_tx.send(DeviceCommand::StartUnlock);
+        self.send(DeviceCommand::StartUnlock);
     }
 
     fn unlock_highlight(&self) -> &[(u8, u8)] {
@@ -163,6 +235,13 @@ impl App {
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
             keyboard::show(ui, &self.state, now, self.unlock_highlight());
+            return;
+        }
+        if self.worker_stopped {
+            // The red error in the status bar carries the detail; don't also suggest plugging
+            // the keyboard back in when nothing about it will change again.
+            ui.heading("Keyboard worker stopped");
+            ui.label("Restart the assistant to read the keyboard again.");
             return;
         }
         match &self.connection {
@@ -180,20 +259,61 @@ impl App {
                 ui.heading("Paused");
                 ui.label(format!("{} has the keyboard open. Close it and the assistant reconnects.", holders.join(", ")));
             }
-            Connection::Waiting | Connection::Connected => {
+            Connection::Waiting => {
                 ui.heading("Waiting for Lily58…");
                 ui.label("Plug in the keyboard; it's picked up automatically.");
+            }
+            Connection::Connected => {
+                ui.heading("Reading the keyboard…");
+                let label = if matches!(self.unlock, Unlock::InProgress { .. }) {
+                    "Finish the unlock to see the keyboard picture."
+                } else {
+                    "This takes a moment."
+                };
+                ui.label(label);
             }
         }
     }
 }
 
 impl eframe::App for App {
+    /// The focused tier reads everything typed into the window. Tab, Space and Enter would also
+    /// move keyboard focus onto the app's buttons and press them, including the unlock, which
+    /// can't be cancelled. egui acts on Tab before `ui` runs, so the keys are taken out here.
+    ///
+    /// While the window is minimised/occluded, eframe runs no egui pass at all: it hands this
+    /// hook the same not-yet-delivered `RawInput` again on every pass (growing it with any new
+    /// events in the meantime) instead of a fresh one, so `raw_input.events` isn't reliably just
+    /// "what's new" (see `update_logic_only`/`prepare_raw_input` in eframe's
+    /// `native/epi_integration.rs`). Only the events beyond what `typed_seen` already accounts
+    /// for are genuinely new; a shorter list than `typed_seen` means a real pass finally
+    /// consumed the backlog, so everything here is new again.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let new_from = if raw_input.events.starts_with(&self.typed_seen) { self.typed_seen.len() } else { 0 };
+        self.typed.extend(raw_input.events[new_from..].iter().cloned());
+        raw_input.events.retain(|e| !focused::operates_widgets(e));
+        self.typed_seen.clone_from(&raw_input.events);
+    }
+
+    /// Called once right after `raw_input_hook`, on both the visible path (before `ui`) and the
+    /// hidden one (instead of it), so this is where `typed` must be drained: `ui` only runs
+    /// while the window is visible, which is exactly when the duplication in `raw_input_hook`'s
+    /// doc comment would otherwise pile up unseen.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = Instant::now();
+        for input in focused::translate(&std::mem::take(&mut self.typed)) {
+            match input {
+                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
+                FocusedInput::Key(_) => {} // evdev already reported it
+                FocusedInput::Text(text) => self.state.on_text(&text),
+                FocusedInput::FocusLost => self.state.release_focused_keys(),
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = Instant::now();
-        while let Ok(event) = self.device_rx.try_recv() {
-            self.on_device_event(event, now);
-        }
+        self.drain_device_events(now);
         while let Ok(msg) = self.input_rx.try_recv() {
             match msg {
                 InputMsg::Key(key) => self.state.os_key(&key, now),
@@ -201,14 +321,6 @@ impl eframe::App for App {
                     self.evdev = EvdevStatus::NotFound;
                     self.state.evdev_active = false;
                 }
-            }
-        }
-        let events = ui.ctx().input(|i| i.events.clone());
-        for input in focused::translate(&events) {
-            match input {
-                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
-                FocusedInput::Key(_) => {} // evdev already reported it
-                FocusedInput::Text(text) => self.state.on_text(&text),
             }
         }
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
@@ -221,5 +333,162 @@ impl eframe::App for App {
 
         // Tap-hold keys become holds after the tapping term with no new input, so keep repainting.
         ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceInfo;
+    use crate::hid::fake::{SMALL_DEFINITION, SMALL_KEYMAP};
+    use crate::keymap::Keymap;
+    use crate::layout::Layout;
+
+    /// An `App` wired to channels instead of a device worker.
+    fn app(config_error: Option<&str>) -> (App, Sender<DeviceEvent>, Receiver<DeviceCommand>) {
+        let (events_tx, device_rx) = mpsc::channel();
+        let (device_tx, commands_rx) = mpsc::channel();
+        let app =
+            App::with_device(&Config::default(), config_error.map(String::from), egui::Context::default(), device_tx, device_rx);
+        (app, events_tx, commands_rx)
+    }
+
+    /// `Connected` for the 2x3 test keyboard. Its `usb_dir` matches no real device, so no evdev reader starts.
+    fn connected() -> DeviceEvent {
+        let layout = Layout::from_definition(&serde_json::from_str(SMALL_DEFINITION).unwrap()).unwrap();
+        let buf: Vec<u8> = SMALL_KEYMAP.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let info = DeviceInfo {
+            dev_node: "/dev/hidraw99".into(),
+            usb_dir: "/nonexistent/usb".into(),
+            product: "Sim58".into(),
+            via_protocol: 12,
+            vial_protocol: 6,
+        };
+        DeviceEvent::Connected { info, layout, keymap: Keymap::from_buffer(2, 2, 3, &buf).unwrap() }
+    }
+
+    #[test]
+    fn config_error_outlives_device_events() {
+        let (mut app, _events, _commands) = app(Some("Config ignored, using defaults: bad"));
+        app.on_device_event(DeviceEvent::Error("boom".into()), Instant::now());
+        app.on_device_event(connected(), Instant::now());
+        assert_eq!(app.error, None, "Connected clears device errors");
+        assert_eq!(app.config_error.as_deref(), Some("Config ignored, using defaults: bad"));
+    }
+
+    #[test]
+    fn tab_space_and_enter_reach_the_tracker_but_not_the_buttons() {
+        let (mut app, _events, _commands) = app(None);
+        let ctx = egui::Context::default();
+        let key = |k: egui::Key| egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (mut clicks, mut typed) = (0, Vec::new());
+        // Unfiltered, Tab focuses the button and Space and Enter each press it.
+        let frames = [
+            vec![],
+            vec![key(egui::Key::Tab)],
+            vec![],
+            vec![key(egui::Key::Space)],
+            vec![],
+            vec![key(egui::Key::Enter)],
+            vec![],
+        ];
+        for events in frames {
+            let mut raw = egui::RawInput { events, ..Default::default() };
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            typed.append(&mut app.typed);
+            ctx.run_ui(raw, |ui| {
+                if ui.button("Unlock for layer tracking").clicked() {
+                    clicks += 1;
+                }
+            })
+            .textures_delta
+            .clear();
+        }
+        assert_eq!(clicks, 0);
+        assert_eq!(typed, vec![key(egui::Key::Tab), key(egui::Key::Space), key(egui::Key::Enter)]);
+    }
+
+    /// While the window is minimised/occluded, eframe runs no egui pass at all: it re-hooks the
+    /// same not-yet-delivered `RawInput` on every pass (growing it with any new events), instead
+    /// of handing the hook a fresh one each time. `typed` must still see each event once.
+    #[test]
+    fn hidden_passes_do_not_duplicate_typed_events() {
+        let (mut app, _events, _commands) = app(None);
+        let ctx = egui::Context::default();
+        let a = egui::Event::Text("a".into());
+        let mut raw = egui::RawInput { events: vec![a.clone()], ..Default::default() };
+
+        // First hidden pass.
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a.clone()]);
+
+        // Second hidden pass: nothing consumed `raw`, so eframe hooks the same events again.
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a.clone()], "the event must not be recorded twice");
+
+        // A genuinely new event arriving on a later hidden pass is still captured, once.
+        let b = egui::Event::Text("b".into());
+        raw.events.push(b.clone());
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.typed, vec![a, b]);
+    }
+
+    #[test]
+    fn paused_hides_an_unlock_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        assert!(!app.unlock_highlight().is_empty());
+        app.on_device_event(DeviceEvent::Paused { holders: vec!["vial (7)".into()] }, now);
+        assert_eq!(app.unlock, Unlock::Unknown, "no unlock window over \"Paused\"");
+        assert!(app.unlock_highlight().is_empty());
+    }
+
+    #[test]
+    fn resume_clears_paused_while_an_unlock_is_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        app.on_device_event(DeviceEvent::Paused { holders: vec!["vial (7)".into()] }, now);
+        app.on_device_event(DeviceEvent::Resumed, now);
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        assert_eq!(app.connection, Connection::Connected, "no \"Paused\" once the other program has let go (#9)");
+        assert!(matches!(app.unlock, Unlock::InProgress { .. }));
+    }
+
+    #[test]
+    fn losing_the_session_forgets_the_unlock_and_waiting_clears_the_error() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 40, unlock_keys: vec![] }, now);
+        app.on_device_event(DeviceEvent::Error("keyboard sent an unexpected reply: x".into()), now);
+        assert_eq!(app.unlock, Unlock::Unknown);
+        assert!(app.error.is_some());
+        app.on_device_event(DeviceEvent::Waiting, now);
+        assert_eq!(app.error, None, "an error about a keyboard that's gone is stale");
+    }
+
+    #[test]
+    fn a_stopped_device_worker_is_reported() {
+        let (mut app, events, _commands) = app(None);
+        app.on_device_event(connected(), Instant::now());
+        drop(events); // the worker thread ended, or never started
+        app.drain_device_events(Instant::now());
+        assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
+        assert!(app.state.layout.is_none(), "the picture can no longer update, so it goes");
+    }
+
+    #[test]
+    fn commands_to_a_stopped_device_worker_are_reported() {
+        let (mut app, _events, commands) = app(None);
+        drop(commands);
+        app.start_unlock();
+        assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
     }
 }
