@@ -237,6 +237,13 @@ impl App {
             keyboard::show(ui, &self.state, now, self.unlock_highlight());
             return;
         }
+        if self.worker_stopped {
+            // The red error in the status bar carries the detail; don't also suggest plugging
+            // the keyboard back in when nothing about it will change again.
+            ui.heading("Keyboard worker stopped");
+            ui.label("Restart the assistant to read the keyboard again.");
+            return;
+        }
         match &self.connection {
             Connection::NoAccess(path) => {
                 ui.heading("Can't read the keyboard");

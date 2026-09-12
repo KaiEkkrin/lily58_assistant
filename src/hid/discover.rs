@@ -21,7 +21,7 @@ pub struct VialDevice {
 }
 
 /// First Vial raw-HID interface. `sys_root` is normally `/sys`, `dev_root` `/dev`.
-/// A missing `class/hidraw` means no device. Any other error is passed on on purpose: the
+/// A missing `class/hidraw` means no device. Any other error is deliberately passed on: the
 /// worker reports it once ("scanning for the keyboard failed"), which beats waiting silently.
 pub fn find_vial_device(sys_root: &Path, dev_root: &Path) -> io::Result<Option<VialDevice>> {
     let class = sys_root.join("class/hidraw");

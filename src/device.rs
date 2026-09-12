@@ -105,6 +105,8 @@ struct Session {
     /// Other programs holding the device, as last reported; non-empty means paused.
     holders: Vec<String>,
     /// The unlock counter last sent to the UI, so a poll that finds it unchanged sends nothing.
+    /// It is `None` whenever the lock enters `Unlocking`: every exit from `Unlocking`
+    /// (completion, resume, session drop) resets it, so it starts fresh next time.
     unlock_counter_sent: Option<u8>,
     next_holder_check: Instant,
     next_lock_check: Instant,
@@ -129,7 +131,8 @@ pub struct Worker<C: Connector> {
     conn: Conn,
     /// The message of the last non-disconnect error reported for the current run of
     /// connection attempts, so a deterministic failure (e.g. a bad definition) isn't
-    /// re-announced on every reconnect. Cleared whenever a session loads successfully.
+    /// re-announced on every reconnect. Cleared whenever a session loads successfully, and also
+    /// whenever the keyboard is gone (disconnected, or `find()` finds nothing).
     last_failure: Option<String>,
 }
 
