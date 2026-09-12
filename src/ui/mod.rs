@@ -5,7 +5,7 @@ pub mod keyboard;
 mod status;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -33,6 +33,10 @@ enum Unlock {
     Unlocked,
 }
 
+/// Shown when the device worker has stopped (it panicked, or its thread never started).
+const DEVICE_WORKER_STOPPED: &str =
+    "The keyboard worker has stopped, so the keyboard can't be read. Restart the assistant; the log says why.";
+
 pub struct App {
     state: AppState,
     connection: Connection,
@@ -43,6 +47,8 @@ pub struct App {
     error: Option<String>,
     /// Kept apart from `error`, which device events clear; this stays until dismissed.
     config_error: Option<String>,
+    /// The device worker's channel has closed; reported once.
+    worker_stopped: bool,
     show_hints: bool,
     /// Everything typed into the window this frame, copied in `raw_input_hook` before egui
     /// sees it.
@@ -95,6 +101,7 @@ impl App {
             evdev_usb_dir: None,
             error: None,
             config_error,
+            worker_stopped: false,
             show_hints: false,
             typed: Vec::new(),
             device_rx,
@@ -107,10 +114,19 @@ impl App {
 
     fn on_device_event(&mut self, event: DeviceEvent, now: Instant) {
         match event {
-            DeviceEvent::Waiting => self.connection = Connection::Waiting,
-            DeviceEvent::NoAccess(path) => self.connection = Connection::NoAccess(path),
+            DeviceEvent::Waiting => {
+                self.connection = Connection::Waiting;
+                self.unlock = Unlock::Unknown;
+                self.error = None; // no keyboard, so any error about it is stale
+            }
+            DeviceEvent::NoAccess(path) => {
+                self.connection = Connection::NoAccess(path);
+                self.unlock = Unlock::Unknown;
+            }
             DeviceEvent::Paused { holders } => {
                 self.connection = Connection::Paused(holders);
+                // The other program may lock, unlock or finish an unlock; a resume re-reports it.
+                self.unlock = Unlock::Unknown;
                 self.state.set_matrix_active(false);
             }
             DeviceEvent::Resumed => {} // a fresh Connected follows
@@ -143,7 +159,41 @@ impl App {
                 self.state.set_matrix_active(true);
             }
             DeviceEvent::Matrix { pressed, released } => self.state.matrix_changed(&pressed, &released, now),
-            DeviceEvent::Error(e) => self.error = Some(e),
+            DeviceEvent::Error(e) => {
+                self.error = Some(e);
+                self.unlock = Unlock::Unknown; // errors come only when there is no session
+            }
+        }
+    }
+
+    fn drain_device_events(&mut self, now: Instant) {
+        loop {
+            match self.device_rx.try_recv() {
+                Ok(event) => self.on_device_event(event, now),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.on_worker_stopped();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The device worker's end of the channels is gone. Nothing about the keyboard will change
+    /// again, so clear it and say so.
+    fn on_worker_stopped(&mut self) {
+        if self.worker_stopped {
+            return;
+        }
+        self.worker_stopped = true;
+        log::error!("the device worker has stopped");
+        self.on_device_event(DeviceEvent::Disconnected, Instant::now());
+        self.error = Some(DEVICE_WORKER_STOPPED.into());
+    }
+
+    fn send(&mut self, cmd: DeviceCommand) {
+        if self.device_tx.send(cmd).is_err() {
+            self.on_worker_stopped();
         }
     }
 
@@ -158,7 +208,7 @@ impl App {
     /// Re-reads the keymap and, if all-windows tracking isn't running yet, retries it
     /// (e.g. just after installing the udev rule).
     fn reload(&mut self) {
-        let _ = self.device_tx.send(DeviceCommand::Reload);
+        self.send(DeviceCommand::Reload);
         self.state.reset_tracking();
         if self.evdev != EvdevStatus::Active
             && let Some(dir) = self.evdev_usb_dir.clone()
@@ -168,7 +218,7 @@ impl App {
     }
 
     fn start_unlock(&mut self) {
-        let _ = self.device_tx.send(DeviceCommand::StartUnlock);
+        self.send(DeviceCommand::StartUnlock);
     }
 
     fn unlock_highlight(&self) -> &[(u8, u8)] {
@@ -214,9 +264,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = Instant::now();
-        while let Ok(event) = self.device_rx.try_recv() {
-            self.on_device_event(event, now);
-        }
+        self.drain_device_events(now);
         while let Ok(msg) = self.input_rx.try_recv() {
             match msg {
                 InputMsg::Key(key) => self.state.os_key(&key, now),
@@ -323,5 +371,46 @@ mod tests {
         }
         assert_eq!(clicks, 0);
         assert_eq!(typed, vec![key(egui::Key::Tab), key(egui::Key::Space), key(egui::Key::Enter)]);
+    }
+
+    #[test]
+    fn paused_hides_an_unlock_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 50, unlock_keys: vec![(1, 0), (1, 2)] }, now);
+        assert!(!app.unlock_highlight().is_empty());
+        app.on_device_event(DeviceEvent::Paused { holders: vec!["vial (7)".into()] }, now);
+        assert_eq!(app.unlock, Unlock::Unknown, "no unlock window over \"Paused\"");
+        assert!(app.unlock_highlight().is_empty());
+    }
+
+    #[test]
+    fn losing_the_session_forgets_the_unlock_and_waiting_clears_the_error() {
+        let (mut app, _events, _commands) = app(None);
+        let now = Instant::now();
+        app.on_device_event(DeviceEvent::Unlocking { counter: 40, unlock_keys: vec![] }, now);
+        app.on_device_event(DeviceEvent::Error("keyboard sent an unexpected reply: x".into()), now);
+        assert_eq!(app.unlock, Unlock::Unknown);
+        assert!(app.error.is_some());
+        app.on_device_event(DeviceEvent::Waiting, now);
+        assert_eq!(app.error, None, "an error about a keyboard that's gone is stale");
+    }
+
+    #[test]
+    fn a_stopped_device_worker_is_reported() {
+        let (mut app, events, _commands) = app(None);
+        app.on_device_event(connected(), Instant::now());
+        drop(events); // the worker thread ended, or never started
+        app.drain_device_events(Instant::now());
+        assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
+        assert!(app.state.layout.is_none(), "the picture can no longer update, so it goes");
+    }
+
+    #[test]
+    fn commands_to_a_stopped_device_worker_are_reported() {
+        let (mut app, _events, commands) = app(None);
+        drop(commands);
+        app.start_unlock();
+        assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
     }
 }

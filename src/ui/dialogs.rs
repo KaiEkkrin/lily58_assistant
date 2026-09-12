@@ -81,3 +81,23 @@ fn hint_block(ui: &mut egui::Ui, hint: &Hint) {
 fn mark(ok: bool) -> &'static str {
     if ok { "✔" } else { "✖" }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_and_cross_are_in_eguis_bundled_fonts() {
+        // egui draws only its bundled fonts, never the desktop's, so this holds on every desktop.
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear(); // loads the fonts
+        let font = egui::FontId::proportional(14.0);
+        // epaint 0.36's `has_glyph` wrongly says false for anything in its emoji fonts; a
+        // missing glyph shows up as zero width instead.
+        let width = |c: char| ctx.fonts_mut(|f| f.glyph_width(&font, c));
+        assert_eq!(width('\u{10FFFD}'), 0.0, "control: a character no font has");
+        for c in mark(true).chars().chain(mark(false).chars()) {
+            assert!(width(c) > 0.0, "{c:?} has no glyph");
+        }
+    }
+}

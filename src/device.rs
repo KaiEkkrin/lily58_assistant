@@ -397,6 +397,7 @@ pub fn spawn(
         }
     });
     if let Err(e) = spawned {
+        // The closure, and the event sender with it, is dropped, so the UI sees the channel close.
         log::error!("cannot start the device thread: {e}");
     }
     cmd_tx
