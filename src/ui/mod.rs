@@ -44,6 +44,9 @@ pub struct App {
     /// Kept apart from `error`, which device events clear; this stays until dismissed.
     config_error: Option<String>,
     show_hints: bool,
+    /// Everything typed into the window this frame, copied in `raw_input_hook` before egui
+    /// sees it.
+    typed: Vec<egui::Event>,
     device_rx: Receiver<DeviceEvent>,
     device_tx: Sender<DeviceCommand>,
     input_tx: Sender<InputMsg>,
@@ -93,6 +96,7 @@ impl App {
             error: None,
             config_error,
             show_hints: false,
+            typed: Vec::new(),
             device_rx,
             device_tx,
             input_tx,
@@ -200,6 +204,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// The focused tier reads everything typed into the window. Tab, Space and Enter would also
+    /// move keyboard focus onto the app's buttons and press them, including the unlock, which
+    /// can't be cancelled. egui acts on Tab before `ui` runs, so the keys are taken out here.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.typed.extend(raw_input.events.iter().cloned());
+        raw_input.events.retain(|e| !focused::operates_widgets(e));
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = Instant::now();
         while let Ok(event) = self.device_rx.try_recv() {
@@ -214,8 +226,7 @@ impl eframe::App for App {
                 }
             }
         }
-        let events = ui.ctx().input(|i| i.events.clone());
-        for input in focused::translate(&events) {
+        for input in focused::translate(&std::mem::take(&mut self.typed)) {
             match input {
                 FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
                 FocusedInput::Key(_) => {} // evdev already reported it
@@ -274,5 +285,43 @@ mod tests {
         app.on_device_event(connected(), Instant::now());
         assert_eq!(app.error, None, "Connected clears device errors");
         assert_eq!(app.config_error.as_deref(), Some("Config ignored, using defaults: bad"));
+    }
+
+    #[test]
+    fn tab_space_and_enter_reach_the_tracker_but_not_the_buttons() {
+        let (mut app, _events, _commands) = app(None);
+        let ctx = egui::Context::default();
+        let key = |k: egui::Key| egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (mut clicks, mut typed) = (0, Vec::new());
+        // Unfiltered, Tab focuses the button and Space and Enter each press it.
+        let frames = [
+            vec![],
+            vec![key(egui::Key::Tab)],
+            vec![],
+            vec![key(egui::Key::Space)],
+            vec![],
+            vec![key(egui::Key::Enter)],
+            vec![],
+        ];
+        for events in frames {
+            let mut raw = egui::RawInput { events, ..Default::default() };
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            typed.append(&mut app.typed);
+            ctx.run_ui(raw, |ui| {
+                if ui.button("Unlock for layer tracking").clicked() {
+                    clicks += 1;
+                }
+            })
+            .textures_delta
+            .clear();
+        }
+        assert_eq!(clicks, 0);
+        assert_eq!(typed, vec![key(egui::Key::Tab), key(egui::Key::Space), key(egui::Key::Enter)]);
     }
 }

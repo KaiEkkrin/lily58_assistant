@@ -32,6 +32,12 @@ pub fn translate(events: &[Event]) -> Vec<FocusedInput> {
         .collect()
 }
 
+/// Keys egui uses to move keyboard focus between widgets (Tab) and to press the focused one
+/// (Space, Enter).
+pub fn operates_widgets(event: &Event) -> bool {
+    matches!(event, Event::Key { key: Key::Tab | Key::Space | Key::Enter, .. })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

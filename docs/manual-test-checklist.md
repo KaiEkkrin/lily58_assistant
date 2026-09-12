@@ -12,6 +12,7 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Shift+2 shows `"` and Shift+3 shows `£` (UK layout).
 - [ ] Typing in another window changes nothing.
 - [ ] Hold Shift, Alt+Tab to another window, release both there, then come back: no key stays highlighted, and typing 3 shows `3`, not `£` (#1).
+- [ ] With the "Tracking tiers" window open, type Tab, Space and Enter several times: no button is pressed and no unlock starts, yet Space and Enter still highlight their keys (#2).
 
 ## All windows (evdev rule installed)
 - [ ] After installing the rule and pressing Reload, the status bar says "all windows, no layer tracking".
