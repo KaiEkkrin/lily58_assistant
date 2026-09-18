@@ -337,11 +337,11 @@ Resolution for a character `c`:
    separate Shift), plus a layer key if the layer is not 0.
 3. **Pick the cheapest**: fewest holds, tie-broken by lower layer, then matrix
    order. Enumerating rather than reusing `Keymap::find_position` is what makes
-   a preference possible at all. On the reference keymap `{` is
-   `LSFT(KC_LBRC)` on layer 1 at `(8,2)` — one hold, the left thumb — against
-   Shift plus layer 2's `[`, which is two. The tie-break matters too: `!` is
-   `LSFT(KC_1)` on both layer 0 and layer 1, so equal holds and the lower layer
-   wins, teaching Shift+1.
+   a preference possible at all. On the reference keymap `{` has three routes: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated
+   `LSFT(KC_LBRC)` at `(8,2)` holding `MO(1)`, and layer 2's `[` plus Shift. The
+   first two cost one hold each, so the lower-layer tie-break decides and the hint
+   teaches Shift+`[`. The same rule makes `!` resolve to layer 0's Shift+1 rather
+   than layer 1's `LSFT(KC_1)`, which is what the Shift drill is for.
 4. **Layer keys are searched on layer 0 only.** A key decoding to `Momentary` or
    `LayerTap` for the target layer is preferred, then `LayerMod`,
    `OneShotLayer`, `Toggle`, `TapToggle`, `To`. Searching all layers would be
@@ -609,8 +609,8 @@ keymap, and `hid::fake::SMALL_KEYMAP` is a 2x3 toy.
   character* (not necessarily the same usage; the keypad duplicates make that a
   deliberately weaker claim). Named cases: `#` yields both 0x31 and 0x32, `/`
   yields `KC_SLSH` before the keypad, `£` yields Shift+3, `A` yields Shift+`KC_A`.
-- **`hint.rs`** against the fixture keymap — `{` resolves to `(8,2)` on layer 1
-  holding `(4,2)`; `!` resolves to layer 0 Shift+1 rather than layer 1; the
+- **`hint.rs`** against the fixture keymap — `{` resolves to layer 0's `[` at
+  `(4,0)` plus Shift, beating layer 1's dedicated `{` on the lower-layer tie-break; `!` resolves to layer 0 Shift+1 rather than layer 1; the
   Shift key chosen is on the opposite hand; a character only on layer 3 is
   unreachable; space resolves to `(4,1)`.
 - **`generate.rs`** — seeded `StdRng`, exact expected batch strings, plus

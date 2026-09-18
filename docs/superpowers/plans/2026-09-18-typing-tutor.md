@@ -589,10 +589,11 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_symbol_names_the_layer_key_to_hold() {
-        // `{` is LSFT(KC_LBRC) on layer 1 at (8, 2); MO(1) is the left thumb at (4, 2). The
-        // keycode carries its own Shift, so no Shift key is needed.
-        assert_eq!(path('{'), KeyPath { key: (8, 2), hold: vec![(4, 2)] });
+    fn equal_cost_paths_prefer_the_lower_layer_even_against_a_dedicated_key() {
+        // `{` has three routes here. Shift plus layer 0's `[` at (4, 0) and layer 1's dedicated
+        // LSFT(KC_LBRC) at (8, 2) holding MO(1) both cost one hold, so the lower layer wins.
+        // Layer 2's `[` needs MO(2) and Shift, which is two.
+        assert_eq!(path('{'), KeyPath { key: (4, 0), hold: vec![(8, 0)] });
     }
 
     /// `#` is only reachable as KC_NUHS on layer 1. This is the case that needs `usages_for` to
@@ -676,9 +677,10 @@ pub struct KeyPath {
 ///
 /// Cheapest means fewest keys held, tie-broken by the lower layer and then matrix order. Every
 /// candidate is enumerated rather than taking the first match, because a preference only exists
-/// if you can see them all: on the reference keymap `{` is one hold on layer 1 but two as
-/// Shift plus layer 2's `[`. (`Keymap::find_position` still serves the OS-key inference it was
-/// written for; it stops at the first hit and knows nothing about Shift.)
+/// if you can see them all: on the reference keymap `{` can be Shift plus layer 0's `[`, layer
+/// 1's dedicated `LSFT(KC_LBRC)`, or layer 2's `[` plus Shift — the first two tie at one hold
+/// and the lower layer breaks it. (`Keymap::find_position` still serves the OS-key inference it
+/// was written for; it stops at the first hit and knows nothing about Shift.)
 pub fn resolve(keymap: &Keymap, host: HostLayout, c: char) -> Option<KeyPath> {
     let usages = host.usages_for(c);
     if usages.is_empty() {
@@ -3222,10 +3224,13 @@ Add a new section before "Testing lesson":
   hint. Restricting the search to layer 0 makes hints correct by construction and treats anything
   deeper as unreachable. Nothing is lost on this keymap: layer 3 is RGB controls and `KC_NO`.
   This is also why there is no tri-layer branch in `hint.rs`.
-- **Cheapest-path picking pays for itself.** `{` is `LSFT(KC_LBRC)` on layer 1 at `(8,2)` — one
-  hold — against Shift plus layer 2's `[`, which is two. Taking the first match found would teach
-  the wrong chord. The tie-break matters too: `!` exists on both layer 0 and layer 1 at one hold
-  each, and preferring the lower layer teaches Shift+1.
+- **Cheapest-path picking pays for itself, and the tie-break does real work.** `{` has three
+  routes on this keymap: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated
+  `LSFT(KC_LBRC)` at `(8,2)` holding `MO(1)`, and layer 2's `[` plus Shift. The first two both
+  cost one hold, so the lower-layer tie-break decides and the hint teaches Shift+`[`. The same
+  rule makes `!` resolve to layer 0's Shift+1 rather than layer 1's `LSFT(KC_1)`, which is what
+  the Shift drill is for. To teach dedicated layer keys instead, invert the layer term in the
+  rank tuple in `hint::resolve` — but that flips `!` too.
 - **A batch is abandoned on any `DeviceEvent::Connected`, not just on Reload.** Both
   `DeviceCommand::Reload` and resuming after another program releases the device set
   `Session::loaded = false` and re-read the keymap, so a remap made in Vial arrives without a
