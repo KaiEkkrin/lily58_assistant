@@ -983,12 +983,15 @@ pub const DRILLS: &[Drill] = &[
         shift: Shift::Never,
         style: Style::Words,
     },
+    // Letter groups, not words: the bottom row is z x c v m , . / and English barely uses
+    // those letters together — the word list yields six. The Words fallback exists for
+    // surprises, not for a standard drill that would apologise on every batch.
     Drill {
         name: "Stretch down",
         kind: Kind::Position,
         source: Source::Keys { include: &[HOME, BOTTOM], focus: Some(BOTTOM) },
         shift: Shift::Never,
-        style: Style::Words,
+        style: Style::Syllables,
     },
     Drill {
         name: "Number row",
