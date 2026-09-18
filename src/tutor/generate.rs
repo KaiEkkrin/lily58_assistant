@@ -302,6 +302,22 @@ mod tests {
         assert!(alpha.chars().any(|c| c == ' '), "space is always available, whatever the drill");
     }
 
+    /// `fingers::BANDS` is indexed positionally, so a swap between two bands (say `Number` and
+    /// `Bottom`) would silently make "Number row" drill the bottom-row letters and vice versa —
+    /// every other test in this file would still pass, because they don't check which alphabet
+    /// comes out, only that a batch stays inside it. This pins the identity down against the
+    /// spec's own oracle table.
+    #[test]
+    fn stretch_up_and_number_row_resolve_to_the_right_bands() {
+        let km = reference_keymap();
+        let mut stretch_up = alphabet(find("Stretch up"), &km, HostLayout::Gb).focus_chars();
+        stretch_up.sort_unstable();
+        assert_eq!(stretch_up, vec!['e', 'i', 'o', 'p', 'q', 'r', 'u', 'w']);
+        let mut number_row = alphabet(find("Number row"), &km, HostLayout::Gb).focus_chars();
+        number_row.sort_unstable();
+        assert_eq!(number_row, vec!['0', '1', '2', '3', '4', '7', '8', '9']);
+    }
+
     /// The left outer column is Esc/Tab/Ctrl/Shift, which type nothing, so this drill is the
     /// right pinky alone. `Shift::Allowed` brings in the shifted forms.
     #[test]

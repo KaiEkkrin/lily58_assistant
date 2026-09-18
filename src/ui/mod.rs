@@ -267,6 +267,41 @@ impl App {
             .or_else(|| matches!(self.unlock, Unlock::InProgress { .. }).then(|| "Finish the unlock first.".to_string()))
     }
 
+    /// The only path by which a keystroke reaches `state` and, while the tutor is open, `tutor`.
+    /// Split out of `logic` so a test can drive it directly with synthetic input, without going
+    /// through egui's raw-input plumbing.
+    fn apply_focused(&mut self, inputs: Vec<FocusedInput>, now: Instant) {
+        for input in inputs {
+            match input {
+                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
+                FocusedInput::Key(_) => {} // evdev already reported it
+                FocusedInput::Text(text) => {
+                    self.state.on_text(&text);
+                    if self.tutor.is_active() {
+                        // Text can carry several characters at once (IME, dead keys). Space
+                        // arrives here too, which is why `status::visible` has to special-case it.
+                        for c in text.chars() {
+                            self.tutor_input(tutor::Input::Char(c), now);
+                        }
+                    }
+                }
+                FocusedInput::Command(key) if self.tutor.is_active() => {
+                    let input = match key {
+                        egui::Key::Backspace => tutor::Input::Backspace,
+                        egui::Key::Enter => tutor::Input::Enter,
+                        _ => tutor::Input::Escape,
+                    };
+                    self.tutor_input(input, now);
+                }
+                FocusedInput::Command(_) => {}
+                FocusedInput::FocusLost => {
+                    self.state.release_focused_keys();
+                    self.tutor_input(tutor::Input::FocusLost, now);
+                }
+            }
+        }
+    }
+
     fn unlock_highlight(&self) -> &[(u8, u8)] {
         if matches!(self.unlock, Unlock::InProgress { .. }) { &self.unlock_keys } else { &[] }
     }
@@ -344,35 +379,8 @@ impl eframe::App for App {
     /// doc comment would otherwise pile up unseen.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
-        for input in focused::translate(&std::mem::take(&mut self.typed)) {
-            match input {
-                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
-                FocusedInput::Key(_) => {} // evdev already reported it
-                FocusedInput::Text(text) => {
-                    self.state.on_text(&text);
-                    if self.tutor.is_active() {
-                        // Text can carry several characters at once (IME, dead keys). Space
-                        // arrives here too, which is why `status::visible` has to special-case it.
-                        for c in text.chars() {
-                            self.tutor_input(tutor::Input::Char(c), now);
-                        }
-                    }
-                }
-                FocusedInput::Command(key) if self.tutor.is_active() => {
-                    let input = match key {
-                        egui::Key::Backspace => tutor::Input::Backspace,
-                        egui::Key::Enter => tutor::Input::Enter,
-                        _ => tutor::Input::Escape,
-                    };
-                    self.tutor_input(input, now);
-                }
-                FocusedInput::Command(_) => {}
-                FocusedInput::FocusLost => {
-                    self.state.release_focused_keys();
-                    self.tutor_input(tutor::Input::FocusLost, now);
-                }
-            }
-        }
+        let inputs = focused::translate(&std::mem::take(&mut self.typed));
+        self.apply_focused(inputs, now);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -609,5 +617,75 @@ mod tests {
         assert_eq!(app.tutor_blocked(), None, "nothing blocks it once the keyboard is ready");
         app.on_device_event(DeviceEvent::Unlocking { counter: 10, unlock_keys: vec![] }, Instant::now());
         assert!(app.tutor_blocked().is_some(), "an unlock in progress blocks opening");
+    }
+
+    /// Closes a deferred finding: no test before this one ever drove `App` to
+    /// `Availability::Ready`, because `connected()`'s 2x3 fixture always mismatches the finger
+    /// map. Only the real Lily58 layout gets there.
+    #[test]
+    fn the_real_keyboard_makes_the_tutor_ready() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert_eq!(app.tutor.available(), &Availability::Ready);
+    }
+
+    /// The mutation this guards against: deleting the tutor branch from `FocusedInput::Text` (or
+    /// only applying the first character of a multi-character `Text` event) leaves every other
+    /// test in the suite passing, because nothing else drives a keystroke through `apply_focused`
+    /// into `Session`.
+    #[test]
+    fn apply_focused_types_every_character_of_a_text_event_into_the_session() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle();
+        app.start_drill(0);
+        app.apply_focused(vec![FocusedInput::Text("as".into())], Instant::now());
+        let tutor::Phase::Typing { attempt, .. } = app.tutor.phase() else { panic!("still typing") };
+        assert_eq!(attempt.cursor(), 2, "both characters of the Text event must reach the attempt");
+    }
+
+    /// `FocusLost` must reach `Attempt::pause` through this same seam: feed a keystroke, lose
+    /// focus, then feed another keystroke after a long gap, and the gap must not be measured.
+    #[test]
+    fn apply_focused_focus_lost_pauses_the_tutor_clock() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle();
+        app.start_drill(0);
+        let t0 = Instant::now();
+        app.apply_focused(vec![FocusedInput::Text("a".into())], t0);
+        app.apply_focused(vec![FocusedInput::Text("s".into())], t0 + Duration::from_millis(100));
+        app.apply_focused(vec![FocusedInput::FocusLost], t0 + Duration::from_millis(100));
+        // A ten-minute gap across the focus loss must not be counted as typing time.
+        app.apply_focused(vec![FocusedInput::Text("d".into())], t0 + Duration::from_secs(600));
+        let tutor::Phase::Typing { attempt, .. } = app.tutor.phase() else { panic!("still typing") };
+        assert_eq!(attempt.cursor(), 3);
+        assert_eq!(attempt.elapsed(), Duration::from_millis(100), "the gap across FocusLost must not grow the clock");
+    }
+
+    /// While the tutor is `Off`, keystrokes must reach `state` only — never `Session`, and never
+    /// panic (e.g. by indexing into a batch that doesn't exist).
+    #[test]
+    fn apply_focused_does_not_reach_the_session_while_the_tutor_is_off() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert!(!app.tutor.is_active());
+        app.apply_focused(vec![FocusedInput::Text("as".into())], Instant::now());
+        assert!(!app.tutor.is_active(), "closed is closed: nothing here should open or drive it");
+    }
+
+    /// `Command(Enter)` and `Command(Escape)` are the tutor's own controls, routed through this
+    /// same seam: Enter starts the selected drill from the picker, Escape steps back out.
+    #[test]
+    fn apply_focused_commands_drive_the_tutor_state_machine() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle(); // Off -> Choosing
+        app.tutor.select(0);
+        let now = Instant::now();
+        app.apply_focused(vec![FocusedInput::Command(egui::Key::Enter)], now);
+        assert_eq!(app.tutor.stage(), tutor::Stage::Typing, "Enter starts the selected drill");
+        app.apply_focused(vec![FocusedInput::Command(egui::Key::Escape)], now);
+        assert_eq!(app.tutor.stage(), tutor::Stage::Choosing, "Escape steps back out to Choosing");
     }
 }

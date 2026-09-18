@@ -283,17 +283,25 @@ mod tests {
         assert_eq!(s.worst_chars, vec![('q', 1)]);
     }
 
+    /// One of the ten keystrokes is wrong, so this can tell `keystrokes - mistakes` (the correct
+    /// numerator) apart from plain `keystrokes`: with all ten correct, both give the same
+    /// answer and a numerator swap would pass unnoticed.
     #[test]
     fn words_per_minute_counts_correct_characters_in_fives() {
         let target: Vec<char> = "abcdefghij".chars().collect();
         let t0 = Instant::now();
         let mut a = Attempt::new(target.len());
-        // Ten correct characters at one every 200 ms: 1.8 s of typing after the first keystroke.
+        // Ten keystrokes at one every 200 ms: 1.8 s of typing after the first keystroke. Index 2
+        // is mistyped, so 9 of the 10 keystrokes are correct.
         for (i, c) in target.iter().enumerate() {
-            a.type_char(&target, *c, t0 + Duration::from_millis(200 * i as u64));
+            let typed = if i == 2 { 'z' } else { *c };
+            a.type_char(&target, typed, t0 + Duration::from_millis(200 * i as u64));
         }
         assert_eq!(a.elapsed(), Duration::from_millis(1800));
-        assert!((a.wpm() - (10.0 / 5.0) / (1.8 / 60.0)).abs() < 0.01, "{}", a.wpm());
+        assert_eq!(a.mistakes(), 1);
+        // (9 correct / 5) / (1.8s / 60) = 1.8 / 0.03 = 60 wpm. Using plain `keystrokes` (10)
+        // instead of `keystrokes - mistakes` would give (10 / 5) / 0.03 = 66.67 wpm instead.
+        assert!((a.wpm() - 60.0).abs() < 0.01, "{}", a.wpm());
     }
 
     #[test]

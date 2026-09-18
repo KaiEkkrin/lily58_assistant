@@ -229,6 +229,21 @@ mod tests {
         }
     }
 
+    /// `generate::syllable_item` has two post-loop fix-ups (top up the focus character, top up a
+    /// shifted one) that are mutually exclusive only because the catalogue's one
+    /// `Shift::Required` drill has `focus: None`. A drill pairing `focus: Some(_)` with
+    /// `Shift::Required` would let the shifted fix-up evict the focus character the other one
+    /// just placed, silently losing the "every item exercises its focus" guarantee — so guard
+    /// the precondition here rather than leaving it to a comment alone.
+    #[test]
+    fn no_drill_pairs_a_focus_group_with_required_shift() {
+        for d in DRILLS {
+            if let Source::Keys { focus: Some(_), .. } = d.source {
+                assert_ne!(d.shift, Shift::Required, "{}: focus plus Shift::Required can evict the focus character", d.name);
+            }
+        }
+    }
+
     #[test]
     fn home_keys_selects_the_eight_resting_keys() {
         let Source::Keys { focus: Some(home), .. } = drill(0).source else { panic!("Home keys uses key groups") };
