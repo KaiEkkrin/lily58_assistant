@@ -8,11 +8,46 @@ use crate::hostlayout::HostLayout;
 use crate::keycodes::{self, Action, KC_NO};
 use crate::layout::KeyGeom;
 use crate::state::AppState;
+use crate::tutor::fingers::{self, Finger, Hand};
+use crate::tutor::hint::KeyPath;
 
 const HELD: Color32 = Color32::from_rgb(90, 170, 255);
 const UNLOCK: Color32 = Color32::from_rgb(255, 170, 60);
+/// The key to press next, and the keys to hold to reach it.
+const HINT: Color32 = Color32::from_rgb(120, 200, 120);
+const HINT_HOLD: Color32 = Color32::from_rgb(170, 215, 170);
 /// Gap around each key, in key units.
 const GAP: f32 = 0.05;
+/// Thicker than the plain hairline, so a finger group reads as a group.
+const FINGER_STROKE: f32 = 2.0;
+
+/// What to highlight on the picture besides the keys being pressed.
+#[derive(Default)]
+pub struct View<'a> {
+    pub unlock_keys: &'a [(u8, u8)],
+    /// Outline each key in its finger's colour.
+    pub fingers: bool,
+    pub hint: Option<&'a KeyPath>,
+}
+
+/// Ten colours: four fingers and a thumb on each hand. A mirrored five would be easier on the
+/// eye but wouldn't say which hand a key belongs to, and on a split board that's half the
+/// information. The mapping is a fixed table, not derived from an index, so adjusting one colour
+/// after a theme check doesn't shuffle the others.
+pub fn finger_colour(hand: Hand, finger: Finger) -> Color32 {
+    match (hand, finger) {
+        (Hand::Left, Finger::Pinky) => Color32::from_rgb(224, 108, 117),
+        (Hand::Left, Finger::Ring) => Color32::from_rgb(224, 154, 76),
+        (Hand::Left, Finger::Middle) => Color32::from_rgb(206, 184, 70),
+        (Hand::Left, Finger::Index) => Color32::from_rgb(126, 176, 105),
+        (Hand::Left, Finger::Thumb) => Color32::from_rgb(176, 124, 198),
+        (Hand::Right, Finger::Pinky) => Color32::from_rgb(86, 182, 194),
+        (Hand::Right, Finger::Ring) => Color32::from_rgb(97, 175, 239),
+        (Hand::Right, Finger::Middle) => Color32::from_rgb(140, 140, 224),
+        (Hand::Right, Finger::Index) => Color32::from_rgb(224, 135, 192),
+        (Hand::Right, Finger::Thumb) => Color32::from_rgb(190, 145, 110),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keycap {
@@ -43,7 +78,7 @@ pub fn keycap(code: u16, host: HostLayout) -> Keycap {
     plain(keycodes::label(code).replace("KC_", ""))
 }
 
-pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, unlock_keys: &[(u8, u8)]) {
+pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>) {
     let (Some(layout), Some(keymap)) = (&state.layout, &state.keymap) else { return };
     let mask = state.layer_mask(now);
     let active = state.active_layer(now);
@@ -57,28 +92,42 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, unlock_keys: &[(u
     let origin = response.rect.center() - Vec2::new(span_x, span_y) * unit / 2.0;
     let to_screen = |(x, y): (f32, f32)| Pos2::new(origin.x + (x - min_x) * unit, origin.y + (y - min_y) * unit);
     let visuals = ui.visuals().clone();
+    let hint_key = view.hint.map(|h| h.key);
+    let hint_hold: &[(u8, u8)] = view.hint.map_or(&[], |h| &h.hold);
 
     for key in &layout.keys {
         let (layer, code) = keymap.resolve(mask, key.row, key.col);
         let pos = (key.row, key.col);
-        let (is_held, is_unlock) = (held.contains(&pos), unlock_keys.contains(&pos));
+        let (is_held, is_unlock) = (held.contains(&pos), view.unlock_keys.contains(&pos));
+        let is_hint = hint_key == Some(pos);
+        let is_hold = hint_hold.contains(&pos);
+        // A hinted key turns blue the moment it's actually pressed, so the hint and the press
+        // feedback compose instead of fighting over the same pixels.
         let fill = if is_held {
             HELD
         } else if is_unlock {
             UNLOCK
+        } else if is_hint {
+            HINT
+        } else if is_hold {
+            HINT_HOLD
         } else {
             visuals.widgets.inactive.bg_fill
         };
-        let text_color = if is_held || is_unlock {
+        let text_color = if is_held || is_unlock || is_hint || is_hold {
             Color32::BLACK
         } else if layer < active {
             visuals.weak_text_color() // transparent key: showing a lower layer
         } else {
             visuals.text_color()
         };
+        let stroke = match view.fingers.then(|| fingers::spot(key.row, key.col)).flatten() {
+            Some(spot) => Stroke::new(FINGER_STROKE, finger_colour(spot.hand, spot.finger)),
+            None => Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        };
         let inner = KeyGeom { x: key.x + GAP, y: key.y + GAP, w: key.w - 2.0 * GAP, h: key.h - 2.0 * GAP, ..key.clone() };
         let points: Vec<Pos2> = inner.corners().into_iter().map(to_screen).collect();
-        painter.add(Shape::convex_polygon(points, fill, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)));
+        painter.add(Shape::convex_polygon(points, fill, stroke));
 
         let cap = keycap(code, state.host());
         let center = to_screen(inner.center());
@@ -118,5 +167,34 @@ mod tests {
         assert_eq!(keycap(0x0028, gb), cap("ENT", None));
         assert_eq!(keycap(0x422C, gb), cap("LT(2,SPC)", None));
         assert_eq!(keycap(KC_NO, gb), cap("", None));
+    }
+
+    /// Ten colours, one per finger per hand: a mirrored five would be easier on the eye but
+    /// wouldn't say which hand a key belongs to, and on a split board that's half the point.
+    #[test]
+    fn every_finger_of_every_hand_has_its_own_colour() {
+        use crate::tutor::fingers::{Finger, Hand};
+        let all: Vec<Color32> = [Hand::Left, Hand::Right]
+            .into_iter()
+            .flat_map(|hand| {
+                [Finger::Pinky, Finger::Ring, Finger::Middle, Finger::Index, Finger::Thumb]
+                    .into_iter()
+                    .map(move |finger| finger_colour(hand, finger))
+            })
+            .collect();
+        assert_eq!(all.len(), 10);
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "two fingers share a colour");
+            }
+        }
+    }
+
+    #[test]
+    fn a_default_view_highlights_nothing() {
+        let view = View::default();
+        assert!(view.unlock_keys.is_empty());
+        assert!(!view.fingers);
+        assert!(view.hint.is_none());
     }
 }

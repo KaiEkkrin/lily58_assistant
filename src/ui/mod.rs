@@ -234,7 +234,7 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
-            keyboard::show(ui, &self.state, now, self.unlock_highlight());
+            keyboard::show(ui, &self.state, now, keyboard::View { unlock_keys: self.unlock_highlight(), ..Default::default() });
             return;
         }
         if self.worker_stopped {

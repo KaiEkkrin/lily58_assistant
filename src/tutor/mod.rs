@@ -47,6 +47,16 @@ pub enum Phase {
     Done { drill: DrillId, batch: Batch, summary: Summary },
 }
 
+/// Which phase the session is in, without borrowing its contents — so a UI function can match
+/// on it and then take `&mut` to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Off,
+    Choosing,
+    Typing,
+    Done,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
     Char(char),
@@ -66,6 +76,7 @@ pub struct Session {
     /// route into it — the picker's buttons, Enter, a restart — reports failure the same way.
     start_error: Option<StartError>,
     pub hints_on: bool,
+    pub colours_on: bool,
 }
 
 impl Default for Session {
@@ -84,6 +95,7 @@ impl Session {
             totals: Totals::default(),
             start_error: None,
             hints_on: true,
+            colours_on: true,
         }
     }
 
@@ -93,6 +105,23 @@ impl Session {
 
     pub fn is_active(&self) -> bool {
         !matches!(self.phase, Phase::Off)
+    }
+
+    pub fn stage(&self) -> Stage {
+        match self.phase {
+            Phase::Off => Stage::Off,
+            Phase::Choosing => Stage::Choosing,
+            Phase::Typing { .. } => Stage::Typing,
+            Phase::Done { .. } => Stage::Done,
+        }
+    }
+
+    /// Retype the same text: a fresh attempt over the batch just finished.
+    pub fn again(&mut self) {
+        if let Phase::Done { drill, batch, .. } = &self.phase {
+            let attempt = Attempt::new(batch.target.len());
+            self.phase = Phase::Typing { drill: *drill, batch: batch.clone(), attempt };
+        }
     }
 
     pub fn available(&self) -> &Availability {
