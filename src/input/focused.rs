@@ -19,6 +19,12 @@ pub fn translate(events: &[Event]) -> Vec<FocusedInput> {
     let mut out = Vec::new();
     for event in events {
         match event {
+            // `repeat: false` here is documentation, not a filter: egui only fills `repeat` in
+            // during `InputState::begin_pass`, which runs *after* `raw_input_hook` copies these
+            // events into `App::typed`, so `repeat` is always `false` at this point regardless
+            // of whether the key is actually repeating. Held keys therefore arrive here as
+            // repeated presses — desirable for Backspace, but it also means holding Escape steps
+            // Typing -> Choosing -> Off in two ticks rather than one.
             Event::Key { key, physical_key, pressed, repeat: false, modifiers } => {
                 let k: Key = physical_key.unwrap_or(*key);
                 out.push(FocusedInput::Key(OsKey {
