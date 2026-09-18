@@ -1880,7 +1880,7 @@ impl Attempt {
     pub fn summarise(&self, batch: &Batch) -> Summary {
         let mut fingers_missed: Vec<((Hand, Finger), u32)> = Vec::new();
         let mut chars_missed: Vec<(char, u32)> = Vec::new();
-        for (at, _) in self.wrong.iter().enumerate().filter(|(_, &w)| w) {
+        for (at, _) in self.wrong.iter().enumerate().filter(|&(_, &w)| w) {
             if let Some(spot) = batch.paths.get(at).and_then(Option::as_ref).and_then(|p| fingers::spot(p.key.0, p.key.1)) {
                 tally(&mut fingers_missed, (spot.hand, spot.finger));
             }
@@ -1888,8 +1888,8 @@ impl Attempt {
                 tally(&mut chars_missed, c);
             }
         }
-        fingers_missed.sort_by(|a, b| b.1.cmp(&a.1));
-        chars_missed.sort_by(|a, b| b.1.cmp(&a.1));
+        fingers_missed.sort_by_key(|a| std::cmp::Reverse(a.1));
+        chars_missed.sort_by_key(|a| std::cmp::Reverse(a.1));
         chars_missed.truncate(3);
         Summary {
             chars: batch.target.len(),
