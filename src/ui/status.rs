@@ -47,7 +47,10 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
             app.tutor.toggle();
         }
         if let Some(why) = blocked {
-            button.on_hover_text(why);
+            // The button is only ever disabled when there is a reason, and `on_hover_text`
+            // deliberately shows nothing on a disabled widget — so this has to be the
+            // disabled-specific variant or the reason never reaches the user.
+            button.on_disabled_hover_text(why);
         }
         ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
