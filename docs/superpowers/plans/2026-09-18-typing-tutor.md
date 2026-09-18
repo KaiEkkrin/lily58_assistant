@@ -2203,6 +2203,10 @@ pub struct Session {
     available: Availability,
     selected: DrillId,
     totals: Totals,
+    /// Why the last attempt to start a drill failed. Recorded by `start` itself, so every route
+    /// into it — a picker button, Enter, a restart — reports failure the same way, and no caller
+    /// can drop it on the floor.
+    start_error: Option<StartError>,
     pub hints_on: bool,
 }
 
@@ -2220,6 +2224,7 @@ impl Session {
             available: Availability::NoKeyboard,
             selected: 0,
             totals: Totals::default(),
+            start_error: None,
             hints_on: true,
         }
     }
@@ -2238,6 +2243,10 @@ impl Session {
 
     pub fn totals(&self) -> &Totals {
         &self.totals
+    }
+
+    pub fn start_error(&self) -> Option<&StartError> {
+        self.start_error.as_ref()
     }
 
     pub fn selected(&self) -> DrillId {
@@ -2270,7 +2279,14 @@ impl Session {
     }
 
     pub fn start(&mut self, id: DrillId, keymap: &Keymap, host: HostLayout) -> Result<(), StartError> {
-        let batch = generate::batch(drills::drill(id), keymap, host, &mut self.rng)?;
+        let batch = match generate::batch(drills::drill(id), keymap, host, &mut self.rng) {
+            Ok(batch) => batch,
+            Err(problem) => {
+                self.start_error = Some(problem.clone());
+                return Err(problem);
+            }
+        };
+        self.start_error = None;
         let attempt = Attempt::new(batch.target.len());
         self.selected = id;
         self.phase = Phase::Typing { drill: id, batch, attempt };
@@ -2792,8 +2808,8 @@ fn choosing(ui: &mut egui::Ui, app: &mut App) {
     if let Some(id) = start {
         app.start_drill(id);
     }
-    if let Some(problem) = &app.tutor_error {
-        ui.colored_label(WRONG, problem.as_str());
+    if let Some(problem) = app.tutor.start_error() {
+        ui.colored_label(WRONG, problem.to_string());
     }
 }
 
@@ -2969,15 +2985,12 @@ Add two fields to `struct App`, after `show_hints`:
 
 ```rust
     tutor: Session,
-    /// Why the last attempt to start a drill failed; cleared when one starts.
-    tutor_error: Option<String>,
 ```
 
 Initialise them in `App::with_device`, after `show_hints: false,`:
 
 ```rust
             tutor: Session::new(),
-            tutor_error: None,
 ```
 
 In `on_device_event`, replace the `DeviceEvent::Connected` arm's `self.state.set_keyboard(layout, keymap);` line with:
@@ -3005,12 +3018,11 @@ In the `DeviceEvent::Disconnected` arm, after `self.state.clear_keyboard();`:
 Add these two methods to `impl App`, after `start_unlock`:
 
 ```rust
+    /// The failure reason is recorded inside the session, so the panel reads it from there
+    /// rather than this keeping a second copy that could drift.
     fn start_drill(&mut self, id: drills::DrillId) {
         let Some(keymap) = &self.state.keymap else { return };
-        self.tutor_error = match self.tutor.start(id, keymap, self.state.host()) {
-            Ok(()) => None,
-            Err(problem) => Some(problem.to_string()),
-        };
+        let _ = self.tutor.start(id, keymap, self.state.host());
     }
 
     fn tutor_input(&mut self, input: tutor::Input, now: Instant) {
