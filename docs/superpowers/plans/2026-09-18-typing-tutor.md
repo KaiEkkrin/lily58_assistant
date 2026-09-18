@@ -3119,9 +3119,18 @@ In `src/ui/status.rs`, before the existing `Reload` button:
             app.tutor.toggle();
         }
         if let Some(why) = blocked {
-            button.on_hover_text(why);
+            // The button is only ever disabled when there is a reason, and `on_hover_text`
+            // deliberately shows nothing on a disabled widget — so this has to be the
+            // disabled-specific variant or the reason never reaches the user.
+            button.on_disabled_hover_text(why);
         }
 ```
+
+It must be `on_disabled_hover_text`, not `on_hover_text`: egui's own doc comment on the latter
+says the text is not visible when the widget is disabled (`response.rs:720`), and
+`Tooltip::for_enabled` gates the popup on `response.enabled()` (`tooltip.rs:53`). Since `why` is
+`Some` only when the button is disabled, the plain variant would render nothing at all — a trap
+that compiles, reads naturally and silently does nothing.
 
 A disabled button reports no clicks, so there is deliberately no click route from here to the
 setup window: `NoKeyboard` is explained by the hover text, and the existing
