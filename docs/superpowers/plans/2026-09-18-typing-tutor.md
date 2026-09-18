@@ -2981,7 +2981,8 @@ Add to the imports:
 use crate::tutor::{self, Availability, Session};
 ```
 
-Add two fields to `struct App`, after `show_hints`:
+Add one field to `struct App`, after `show_hints` — the failure reason lives in the session,
+so `App` keeps no copy of its own:
 
 ```rust
     tutor: Session,
