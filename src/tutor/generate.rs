@@ -237,10 +237,17 @@ fn syllable_item(alpha: &Alphabet, drill: &Drill, focus: &[char], rng: &mut impl
         (prev, prev_hand) = (Some(pick.ch), pick.hand);
     }
     // Make sure the group exercises the drill, and uses Shift when the drill is about Shift.
+    // These two fix-ups can in principle fight — the Shift one below could evict the focus
+    // character this one just placed — but across the shipped catalogue they never both fire
+    // for the same drill: the one `Shift::Required` drill has `focus: None`. A future drill
+    // pairing `focus: Some(_)` with `Shift::Required` would need that interaction resolved
+    // first, or it could silently lose the "every item exercises its focus" guarantee.
     if !focus.is_empty() && !out.iter().any(|c| focus.contains(c)) {
         let at = rng.random_range(0..out.len());
         out[at] = focus[rng.random_range(0..focus.len())];
     }
+    // See the comment above: this fix-up and the one above it are mutually exclusive in
+    // practice, not by construction, so a new drill is what would put that precondition to test.
     if drill.shift == Shift::Required && !out.iter().any(|&c| is_shifted(alpha, c)) {
         let shifted: Vec<char> = alpha.letters.iter().filter(|l| l.shifted).map(|l| l.ch).collect();
         if !shifted.is_empty() {
@@ -366,15 +373,25 @@ mod tests {
         assert!(err.to_string().contains("Home keys"));
     }
 
-    /// Syllables shouldn't hammer one finger: the same key never repeats immediately.
+    /// Syllables shouldn't hammer one finger: the same key never repeats immediately. Checked
+    /// against every `Syllables` drill, not just Home keys — Home's focus equals its include and
+    /// it never asks for Shift, so it's the one drill where neither post-loop fix-up in
+    /// `syllable_item` (topping up the focus character, topping up a shifted one) ever runs.
+    /// Number row, Stretch down and Outer column do exercise those fix-ups.
     #[test]
     fn letter_groups_never_repeat_a_key_back_to_back() {
-        let alpha = alphabet(drills::drill(0), &reference_keymap(), HostLayout::Gb);
-        let (text, _) = keys_text(drills::drill(0), &alpha, &mut seeded()).unwrap();
-        for item in text.split(' ') {
-            let chars: Vec<char> = item.chars().collect();
-            for pair in chars.windows(2) {
-                assert_ne!(pair[0], pair[1], "{item:?} repeats a key");
+        let km = reference_keymap();
+        for d in DRILLS {
+            if d.style != Style::Syllables {
+                continue;
+            }
+            let alpha = alphabet(d, &km, HostLayout::Gb);
+            let (text, _) = keys_text(d, &alpha, &mut seeded()).unwrap();
+            for item in text.split(' ') {
+                let chars: Vec<char> = item.chars().collect();
+                for pair in chars.windows(2) {
+                    assert_ne!(pair[0], pair[1], "{}: {item:?} repeats a key", d.name);
+                }
             }
         }
     }
