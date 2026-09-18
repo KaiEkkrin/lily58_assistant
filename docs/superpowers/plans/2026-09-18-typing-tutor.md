@@ -3258,6 +3258,17 @@ Add a new section before "Testing lesson":
   `DeviceCommand::Reload` and resuming after another program releases the device set
   `Session::loaded = false` and re-read the keymap, so a remap made in Vial arrives without a
   Ctrl+R. Hanging abandonment off `App::reload` would leave a batch scoring against stale paths.
+- **`on_hover_text` shows nothing on a disabled widget.** The tutor button computes why it is
+  disabled (no keyboard, layout mismatch, unlock in progress) and must show that with
+  `Response::on_disabled_hover_text`. egui says so in its own doc comment (`response.rs:720`) and
+  gates the popup on `response.enabled()` (`tooltip.rs:53`), so the plain variant compiles, reads
+  naturally and silently does nothing. No test can catch it — nothing in a test suite observes a
+  tooltip.
+- **The bottom row makes almost no English words.** "Stretch down" draws on `z x c v m , . /`, and
+  the shipped word list yields six spellable words against 153 for "stretch up" and 296 for the
+  Shift drill. That is a property of the alphabet, not of this keymap, so the drill declares
+  `Style::Syllables` rather than leaning on the thin-pool fallback and apologising on every batch.
+  Recompute the pools before changing `words.txt` or a drill's groups.
 - **The ten-colour palette has not been validated across themes.** The colours in
   `ui::keyboard::finger_colour` are a starting point and need an eyeball check as thin strokes
   against both the light and dark egui themes.
@@ -3270,7 +3281,8 @@ Add a section to `docs/manual-test-checklist.md`, after "Live layers (unlocked)"
 ```markdown
 ## Typing tutor
 - [ ] Ctrl+T opens the panel; every position drill lists the characters it currently resolves to.
-- [ ] With the keyboard unplugged, the tutor button is disabled and says why.
+- [ ] With the keyboard unplugged, the tutor button is disabled and **hovering it shows the
+      reason** (this needs `on_disabled_hover_text`; no test can observe a tooltip).
 - [ ] "Home keys" generates a fresh batch each time; typing fills the second line, wrong
       characters go red, and backspace takes them back without erasing the error count.
 - [ ] Finger colours are legible on both the light and dark themes, and the two OLED positions
