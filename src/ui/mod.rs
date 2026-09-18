@@ -257,6 +257,16 @@ impl App {
         self.tutor.input(input, keymap, self.state.host(), now);
     }
 
+    /// Why the tutor can't be opened right now, if it can't. An unlock needs two keys held for
+    /// ten seconds and can't be cancelled, so it must not overlap a drill — but this gates
+    /// opening only: an already-open tutor must always be closable.
+    fn tutor_blocked(&self) -> Option<String> {
+        self.tutor
+            .available()
+            .reason()
+            .or_else(|| matches!(self.unlock, Unlock::InProgress { .. }).then(|| "Finish the unlock first.".to_string()))
+    }
+
     fn unlock_highlight(&self) -> &[(u8, u8)] {
         if matches!(self.unlock, Unlock::InProgress { .. }) { &self.unlock_keys } else { &[] }
     }
@@ -380,7 +390,9 @@ impl eframe::App for App {
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
             self.reload();
         }
-        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::T)) {
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::T))
+            && (self.tutor.is_active() || self.tutor_blocked().is_none())
+        {
             self.tutor.toggle();
         }
 
@@ -425,6 +437,25 @@ mod tests {
             vial_protocol: 6,
         };
         DeviceEvent::Connected { info, layout, keymap: Keymap::from_buffer(2, 2, 3, &buf).unwrap() }
+    }
+
+    /// `Connected` for the real Lily58: the layout the finger map actually accepts, and the
+    /// reference keymap `tutor::fixture` parses from a `--probe` dump. `connected()`'s 2x3
+    /// fixture is not a Lily58 by design (`the_tutor_follows_the_keyboard` checks exactly that),
+    /// so it can never bring the tutor to `Availability::Ready` — this is the one that can.
+    fn connected_lily58() -> DeviceEvent {
+        let layout =
+            Layout::from_definition(&serde_json::from_str(include_str!("../../tests/fixtures/lily58-definition.json")).unwrap())
+                .unwrap();
+        let keymap = tutor::fixture::reference_keymap();
+        let info = DeviceInfo {
+            dev_node: "/dev/hidraw98".into(),
+            usb_dir: "/nonexistent/usb-lily58".into(),
+            product: "Lily58".into(),
+            via_protocol: 12,
+            vial_protocol: 6,
+        };
+        DeviceEvent::Connected { info, layout, keymap }
     }
 
     #[test]
@@ -565,5 +596,18 @@ mod tests {
         assert!(!app.tutor.is_active(), "it can't be opened against a layout it doesn't know");
         app.on_device_event(DeviceEvent::Disconnected, Instant::now());
         assert_eq!(app.tutor.available(), &crate::tutor::Availability::NoKeyboard);
+    }
+
+    /// The predicate both Ctrl+T and the status-bar button gate *opening* the tutor on. An
+    /// unlock in progress can't be cancelled and must not overlap a drill, but before this it was
+    /// checked only by the button — Ctrl+T called `Session::toggle` unconditionally and opened
+    /// the tutor right past a running unlock.
+    #[test]
+    fn tutor_blocked_reports_an_unlock_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert_eq!(app.tutor_blocked(), None, "nothing blocks it once the keyboard is ready");
+        app.on_device_event(DeviceEvent::Unlocking { counter: 10, unlock_keys: vec![] }, Instant::now());
+        assert!(app.tutor_blocked().is_some(), "an unlock in progress blocks opening");
     }
 }

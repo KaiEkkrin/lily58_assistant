@@ -182,11 +182,14 @@ impl Session {
 
     /// A freshly read keymap invalidates a batch's precomputed paths, so the batch is abandoned.
     /// This happens on Reload and when another program releases the keyboard — which is how a
-    /// remap in Vial reaches the drills without restarting the app.
+    /// remap in Vial reaches the drills without restarting the app. It also makes any previous
+    /// start failure stale by definition: a remap that fixed the problem shouldn't leave the old
+    /// reason on screen until something else happens to start successfully.
     pub fn keyboard_changed(&mut self) {
         if matches!(self.phase, Phase::Typing { .. } | Phase::Done { .. }) {
             self.phase = Phase::Choosing;
         }
+        self.start_error = None;
     }
 
     pub fn hint(&self) -> Option<&KeyPath> {
@@ -304,6 +307,20 @@ mod tests {
         s.start(0, &km, HostLayout::Gb).unwrap();
         s.keyboard_changed();
         assert!(matches!(s.phase(), Phase::Choosing));
+    }
+
+    /// A remap that fixes a `TooFewKeys`/`NoTokens` failure shouldn't leave the stale reason on
+    /// screen until something else happens to start successfully — the freshly read keymap that
+    /// `keyboard_changed` reacts to is exactly the thing that could have fixed it.
+    #[test]
+    fn a_re_read_keymap_clears_a_stale_start_error() {
+        let (mut s, _) = session();
+        let tiny = Keymap::from_buffer(1, 1, 1, &[0x00, 0x04]).unwrap();
+        s.toggle();
+        s.input(Input::Enter, &tiny, HostLayout::Gb, Instant::now());
+        assert!(s.start_error().is_some(), "the tiny keymap can't support any drill");
+        s.keyboard_changed();
+        assert_eq!(s.start_error(), None, "a fresh keymap makes the old failure stale");
     }
 
     #[test]

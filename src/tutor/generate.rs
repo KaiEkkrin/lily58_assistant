@@ -162,8 +162,14 @@ fn tokens_text(
     host: HostLayout,
     rng: &mut impl RngExt,
 ) -> Result<(String, Option<&'static str>), StartError> {
-    let usable: Vec<&'static str> =
-        tokens.iter().copied().filter(|t| t.chars().all(|c| hint::resolve(keymap, host, c).is_some())).collect();
+    let usable: Vec<&'static str> = tokens
+        .iter()
+        .copied()
+        // An empty token would make the batch loop below make no progress — `text.push(' ')`
+        // is skipped while `text` is still empty, so an empty first pick would spin forever.
+        .filter(|t| !t.is_empty())
+        .filter(|t| t.chars().all(|c| hint::resolve(keymap, host, c).is_some()))
+        .collect();
     if usable.is_empty() {
         return Err(StartError::NoTokens { drill: drill.name });
     }
