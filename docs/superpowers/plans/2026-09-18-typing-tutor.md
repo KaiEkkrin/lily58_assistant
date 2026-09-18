@@ -1043,7 +1043,9 @@ const MARKDOWN: &[&str] = &[
 
 const HTML: &[&str] = &[
     "<div>", "</div>", "<span>", "</span>", "<p>", "</p>", "<ul>", "<li>", "<br />", "<hr />",
-    r#"<a href="#">"#, r#"class="row""#, r#"id="main""#, r#"<input type="text">"#,
+    // `r#"..."#` will not do for the first one: its content contains `"#`, which ends the
+    // literal early. Two hashes, and the token text is unchanged.
+    r##"<a href="#">"##, r#"class="row""#, r#"id="main""#, r#"<input type="text">"#,
     "<!-- note -->", "&amp;", "&lt;", "&gt;", "</html>", "<h1>",
 ];
 
