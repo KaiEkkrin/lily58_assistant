@@ -17,9 +17,13 @@ most of this):
   interface (usage page `0xFF60`); `if02` carries mouse, joystick and
   extra-key event nodes. So there are four `/dev/input/event*` nodes, and only
   the `if00` one carries ordinary key presses.
-- The definition has 60 keys, not 58: the extra two are the encoder push
-  switches (`4,5` and `9,0`). Its four encoder-rotation entries (`e` in the
-  label) are skipped because they have no matrix position.
+- The definition has 60 keys, not 58. The extra two (`4,5` and `9,0`) are matrix positions the
+  firmware supports that a given build need not populate: the PCB takes rotary encoders there,
+  and the reference board has OLED screens instead. The keymap still assigns them something
+  (`KC_MPLY` and `KC_MUTE`), so they appear on the picture as ordinary keys. The typing tutor
+  gives them no finger, so they are the only uncoloured keys while it is open.
+  Its four encoder-rotation entries (`e` in the label) are skipped because they have no matrix
+  position.
 - The left half's matrix columns run **from the inside out**: `0,0` is the "5"
   key and `0,5` is Esc. The right half is rows 5–9. Don't guess key positions
   from the usual Lily58 matrix; read them from the definition.
@@ -85,6 +89,51 @@ most of this):
   so the rest can't be sent as a second write. `EINTR` is retried.
 - `find_vial_device` passes on `read_dir` errors other than NotFound. The worker reports
   them once, which beats waiting silently.
+
+## The typing tutor
+
+- **The finger map is a hardwired table, not derived from geometry.** The first design clustered
+  keys by their coordinates. It doesn't work: the columnar stagger is up to 0.5 units and the row
+  pitch is 1.0, so row bands genuinely overlap across columns — the home row's `y` values sit
+  closer to the inner `[` key at 2.75 than to their own neighbours, and clustering on raw `y`
+  merges the home and bottom rows. Stagger-normalising first (`round(y - stagger(column))`) does
+  work, but a heuristic that misfires produces subtly wrong colours that are hard to notice,
+  where a table is wrong loudly or not at all. `fingers::validate` checks the table against the
+  reported layout in both directions.
+- **`hostlayout::usages_for` must return a list.** GB maps both `KC_BSLS` (0x31) and `KC_NUHS`
+  (0x32) to `#`, and the reference keymap has no `KC_BSLS` anywhere — `#` is `KC_NUHS` on layer 1.
+  A single-answer reverse lookup declares `#` untypeable and silently strips every heading from
+  the Markdown drill.
+- **Layer keys are searched on layer 0 only.** `MO(3)` exists only on layers 1 and 2, so a search
+  across every layer finds a key that does nothing from the base layer and produces an impossible
+  hint. Restricting the search to layer 0 makes hints correct by construction and treats anything
+  deeper as unreachable. Nothing is lost on this keymap: layer 3 is RGB controls and `KC_NO`.
+  This is also why there is no tri-layer branch in `hint.rs`.
+- **Cheapest-path picking pays for itself, and the tie-break does real work.** `{` has three
+  routes on this keymap: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated
+  `LSFT(KC_LBRC)` at `(8,2)` holding `MO(1)`, and layer 2's `[` plus Shift. The first two both
+  cost one hold, so the lower-layer tie-break decides and the hint teaches Shift+`[`. The same
+  rule makes `!` resolve to layer 0's Shift+1 rather than layer 1's `LSFT(KC_1)`, which is what
+  the Shift drill is for. To teach dedicated layer keys instead, invert the layer term in the
+  rank tuple in `hint::resolve` — but that flips `!` too.
+- **A batch is abandoned on any `DeviceEvent::Connected`, not just on Reload.** Both
+  `DeviceCommand::Reload` and resuming after another program releases the device set
+  `Session::loaded = false` and re-read the keymap, so a remap made in Vial arrives without a
+  Ctrl+R. Hanging abandonment off `App::reload` would leave a batch scoring against stale paths.
+- **`on_hover_text` shows nothing on a disabled widget.** The tutor button computes why it is
+  disabled (no keyboard, layout mismatch, unlock in progress) and must show that with
+  `Response::on_disabled_hover_text`. egui says so in its own doc comment (`response.rs:720`) and
+  gates the popup on `response.enabled()` (`tooltip.rs:53`), so the plain variant compiles, reads
+  naturally and silently does nothing. No test can catch it — nothing in a test suite observes a
+  tooltip.
+- **The bottom row makes almost no English words.** "Stretch down" draws on `z x c v m , . /`, and
+  the shipped word list yields six spellable words against 153 for "stretch up" and 296 for the
+  Shift drill. That is a property of the alphabet, not of this keymap, so the drill declares
+  `Style::Syllables` rather than leaning on the thin-pool fallback and apologising on every batch.
+  Recompute the pools before changing `words.txt` or a drill's groups.
+- **The ten-colour palette has not been validated across themes.** The colours in
+  `ui::keyboard::finger_colour` are a starting point and need an eyeball check as thin strokes
+  against both the light and dark egui themes.
 
 ## Testing lesson
 
