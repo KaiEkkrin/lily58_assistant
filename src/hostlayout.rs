@@ -71,6 +71,24 @@ impl HostLayout {
         };
         Some(if shift { shifted } else { plain })
     }
+
+    /// Every HID usage and Shift state that types `c` on this layout, ascending by usage.
+    ///
+    /// A list rather than one answer, because a character can have several usages and a keymap
+    /// may carry only some of them: on GB both `KC_BSLS` and `KC_NUHS` type `#`, and `/` exists
+    /// on the main block and the keypad. Callers pick whichever their keymap actually has.
+    pub fn usages_for(self, c: char) -> Vec<(u8, bool)> {
+        let mut out = Vec::new();
+        for usage in 0x04..=0x67u8 {
+            let plain = self.char_for(usage, false);
+            if plain == Some(c) {
+                out.push((usage, false));
+            } else if self.char_for(usage, true) == Some(c) {
+                out.push((usage, true));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +122,51 @@ mod tests {
     #[test]
     fn default_is_gb() {
         assert_eq!(HostLayout::default(), HostLayout::Gb);
+    }
+
+    /// GB maps both `KC_BSLS` (0x31) and `KC_NUHS` (0x32) to `#`, and a keymap may carry only
+    /// one of them — the reference board has no `KC_BSLS` anywhere. Returning a single answer
+    /// would declare `#` untypeable and silently strip every heading from the Markdown drill.
+    #[test]
+    fn a_character_can_have_more_than_one_usage() {
+        assert_eq!(HostLayout::Gb.usages_for('#'), vec![(0x31, false), (0x32, false)]);
+        assert_eq!(HostLayout::Us.usages_for('*'), vec![(0x25, true), (0x55, false)], "Shift+8 and the keypad");
+    }
+
+    #[test]
+    fn ordinary_characters_resolve_to_one_usage() {
+        let gb = HostLayout::Gb;
+        assert_eq!(gb.usages_for('a'), vec![(0x04, false)]);
+        assert_eq!(gb.usages_for('A'), vec![(0x04, true)]);
+        assert_eq!(gb.usages_for('£'), vec![(0x20, true)]);
+        assert_eq!(gb.usages_for('@'), vec![(0x34, true)]);
+        assert_eq!(gb.usages_for(' '), vec![(0x2C, false)], "the shifted duplicate is dropped");
+        assert_eq!(gb.usages_for('\\'), vec![(0x64, false)], "KC_NUBS on GB; KC_BSLS types # there");
+        assert_eq!(gb.usages_for('€'), vec![], "not on either layout");
+    }
+
+    /// The main keyboard usage comes before its keypad duplicate, so a hint points at the key
+    /// a Lily58 actually has.
+    #[test]
+    fn the_main_usage_comes_before_the_keypad_duplicate() {
+        assert_eq!(HostLayout::Gb.usages_for('/'), vec![(0x38, false), (0x54, false)]);
+    }
+
+    /// Whatever `char_for` produces must resolve back to that character. Not necessarily to the
+    /// same usage: the keypad duplicates make that a deliberately weaker claim.
+    #[test]
+    fn every_character_round_trips() {
+        for layout in [HostLayout::Gb, HostLayout::Us] {
+            for usage in 0x04..=0x67u8 {
+                for shift in [false, true] {
+                    let Some(c) = layout.char_for(usage, shift) else { continue };
+                    let found = layout.usages_for(c);
+                    assert!(!found.is_empty(), "{layout:?} {usage:#04x} shift={shift} -> {c:?} resolves to nothing");
+                    for (u, s) in found {
+                        assert_eq!(layout.char_for(u, s), Some(c), "{layout:?} {u:#04x} shift={s}");
+                    }
+                }
+            }
+        }
     }
 }
