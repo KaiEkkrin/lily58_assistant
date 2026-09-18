@@ -111,10 +111,22 @@ struct Batch {
 Drawing a hint is then an index lookup. `docs/implementation-notes.md` already
 lists per-frame linear scans as a wart worth not repeating (#10).
 
-Ctrl+R (Reload) re-reads the keymap and could invalidate a batch's paths, so
-`App::reload` abandons any batch in progress and returns to drill selection.
-Losing a half-typed batch on an explicit reload is acceptable, and it means no
-stale-paths code path exists at all.
+A fresh keymap invalidates a batch's precomputed `paths`, so **any
+`DeviceEvent::Connected` abandons the batch in progress** and returns to drill
+selection. Keying off `Connected` rather than off `App::reload` matters, because
+the worker re-reads the keymap on two paths, not one:
+
+- `DeviceCommand::Reload` sets `Session::loaded = false` (`device.rs:172`);
+- resuming after another program released the device does the same
+  (`device.rs:317`), precisely because "the other program may have locked,
+  unlocked, or changed the keymap while it held the device".
+
+Both then emit `Connected` with a freshly read layout and keymap; the test at
+`device.rs:634` asserts `["Resumed", "Connected", "Locked"]`. So editing the
+keymap in Vial and closing Vial refreshes the assistant with no Ctrl+R, and the
+tutor's drills follow the edit on the next batch. Hanging abandonment off
+`App::reload` would have missed that path and left a batch scoring against stale
+paths.
 
 ### Data flow
 
@@ -247,10 +259,13 @@ Useful as a test oracle. Home keys are added to every position drill via
 | Outer column | `` ` `` `-` `'` (plus `¬ _ @` shifted) |
 | Index reach | `5 t g b [ 6 y h n ]` |
 
-**The Outer column drill is right-hand only on this keymap.** The left outer
-column is `KC_ESC`, `KC_TAB`, `KC_LCTL`, `KC_LSFT` — no characters at all, and
-the generator drops unprintable keys without a special case. The panel says it
-is a right-pinky drill rather than pretending otherwise.
+**The Outer column drill is right-hand only, and permanently so.** The left
+outer column is `KC_ESC`, `KC_TAB`, `KC_LCTL`, `KC_LSFT` — no characters at all,
+and the keycaps are legended for those functions, so it will not be remapped.
+The generator drops unprintable keys without a special case, so this needs no
+handling; the drill is simply a right-pinky drill and the panel says so. It
+remains position-driven rather than hardcoded, so it would pick up a character
+if one ever appeared there.
 
 ## Generation
 
@@ -470,7 +485,12 @@ explained in one place rather than two.
 assistant is unchanged when the tutor is closed.
 
 - **Choosing** — drill buttons in two labelled rows, positions and programmer; a
-  `Show next-key hints` checkbox; `Close`.
+  `Show next-key hints` checkbox; `Close`. Each position drill shows the
+  characters its `focus` currently resolves to on the live keymap, e.g.
+  `Outer column   ` `` ` `` `- ' ¬ _ @`. This is cheap (the alphabet resolution
+  already exists) and it makes the keymap-reactivity visible: retune a key in
+  Vial, close it, and the drill list shows the new character without a
+  restart.
 - **Typing** — drill name, the text block, a live `accuracy · wpm · errors`
   line, `Stop`.
 - **Done** — the summary block, then `Again` / `Next batch (Enter)` / `Stop`.
