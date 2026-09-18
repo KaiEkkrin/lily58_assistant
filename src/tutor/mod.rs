@@ -4,5 +4,6 @@ pub mod drills;
 pub mod fingers;
 pub mod generate;
 pub mod hint;
+pub mod score;
 #[cfg(test)]
 pub mod fixture;
