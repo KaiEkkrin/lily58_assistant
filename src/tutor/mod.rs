@@ -62,6 +62,9 @@ pub struct Session {
     available: Availability,
     selected: DrillId,
     totals: Totals,
+    /// Why the last attempt to start a drill failed. Recorded by `start` itself, so every
+    /// route into it — the picker's buttons, Enter, a restart — reports failure the same way.
+    start_error: Option<StartError>,
     pub hints_on: bool,
 }
 
@@ -79,6 +82,7 @@ impl Session {
             available: Availability::NoKeyboard,
             selected: 0,
             totals: Totals::default(),
+            start_error: None,
             hints_on: true,
         }
     }
@@ -97,6 +101,10 @@ impl Session {
 
     pub fn totals(&self) -> &Totals {
         &self.totals
+    }
+
+    pub fn start_error(&self) -> Option<&StartError> {
+        self.start_error.as_ref()
     }
 
     pub fn selected(&self) -> DrillId {
@@ -129,7 +137,14 @@ impl Session {
     }
 
     pub fn start(&mut self, id: DrillId, keymap: &Keymap, host: HostLayout) -> Result<(), StartError> {
-        let batch = generate::batch(drills::drill(id), keymap, host, &mut self.rng)?;
+        let batch = match generate::batch(drills::drill(id), keymap, host, &mut self.rng) {
+            Ok(batch) => batch,
+            Err(problem) => {
+                self.start_error = Some(problem.clone());
+                return Err(problem);
+            }
+        };
+        self.start_error = None;
         let attempt = Attempt::new(batch.target.len());
         self.selected = id;
         self.phase = Phase::Typing { drill: id, batch, attempt };
@@ -283,5 +298,29 @@ mod tests {
         assert_eq!(s.hint().cloned(), expected);
         s.hints_on = false;
         assert_eq!(s.hint(), None);
+    }
+
+    #[test]
+    fn enter_in_the_picker_starts_the_selected_drill() {
+        let (mut s, km) = session();
+        s.toggle();
+        s.select(2);
+        s.input(Input::Enter, &km, HostLayout::Gb, Instant::now());
+        let Phase::Typing { drill, .. } = s.phase() else { panic!("Enter starts the selected drill") };
+        assert_eq!(*drill, 2);
+        assert_eq!(s.start_error(), None);
+    }
+
+    /// A one-key keymap has nothing in any drill's `include` band, so `start` fails and `input`
+    /// must not swallow that silently: the keyboard path has to report a problem exactly like the
+    /// picker's buttons will.
+    #[test]
+    fn enter_on_a_drill_this_keymap_cannot_support_records_the_reason() {
+        let (mut s, _) = session();
+        let tiny = Keymap::from_buffer(1, 1, 1, &[0x00, 0x04]).unwrap();
+        s.toggle();
+        s.input(Input::Enter, &tiny, HostLayout::Gb, Instant::now());
+        assert!(matches!(s.phase(), Phase::Choosing), "a failed start leaves the picker open");
+        assert!(matches!(s.start_error(), Some(StartError::TooFewKeys { .. })));
     }
 }
