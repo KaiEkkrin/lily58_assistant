@@ -3,6 +3,7 @@
 mod dialogs;
 pub mod keyboard;
 mod status;
+mod tutor_panel;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -16,6 +17,8 @@ use crate::input::InputMsg;
 use crate::input::evdev::{self as evdev_input, EvdevStatus};
 use crate::input::focused::{self, FocusedInput};
 use crate::state::AppState;
+use crate::tutor::{self, Availability, Session};
+use crate::tutor::drills;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Connection {
@@ -50,6 +53,7 @@ pub struct App {
     /// The device worker's channel has closed; reported once.
     worker_stopped: bool,
     show_hints: bool,
+    tutor: Session,
     /// Everything typed into the window since the last `logic` call, copied in
     /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
     /// eframe calls exactly once per hook call on both the visible and hidden paths.
@@ -108,6 +112,7 @@ impl App {
             config_error,
             worker_stopped: false,
             show_hints: false,
+            tutor: Session::new(),
             typed: Vec::new(),
             typed_seen: Vec::new(),
             device_rx,
@@ -140,7 +145,17 @@ impl App {
             DeviceEvent::Connected { info, layout, keymap } => {
                 self.connection = Connection::Connected;
                 self.error = None;
+                // Check the layout against the finger map before it moves into the state.
+                let availability = match tutor::fingers::validate(&layout) {
+                    Ok(()) => Availability::Ready,
+                    Err(why) => Availability::LayoutMismatch(why),
+                };
                 self.state.set_keyboard(layout, keymap);
+                self.tutor.set_availability(availability);
+                // A freshly read keymap invalidates a batch's paths. This arrives on Reload and
+                // when another program releases the keyboard, which is how a remap in Vial
+                // reaches the drills without restarting the app.
+                self.tutor.keyboard_changed();
                 if self.evdev_usb_dir.as_deref() != Some(info.usb_dir.as_path()) {
                     self.start_evdev(&info.usb_dir);
                 }
@@ -149,6 +164,7 @@ impl App {
                 self.connection = Connection::Waiting;
                 self.unlock = Unlock::Unknown;
                 self.state.clear_keyboard();
+                self.tutor.set_availability(Availability::NoKeyboard);
                 self.evdev = EvdevStatus::NotFound;
                 self.evdev_usb_dir = None;
             }
@@ -225,7 +241,20 @@ impl App {
     }
 
     fn start_unlock(&mut self) {
+        self.tutor.close();
         self.send(DeviceCommand::StartUnlock);
+    }
+
+    /// The failure reason is recorded inside the session, so the panel reads it from there
+    /// rather than this keeping a second copy that could drift.
+    fn start_drill(&mut self, id: drills::DrillId) {
+        let Some(keymap) = &self.state.keymap else { return };
+        let _ = self.tutor.start(id, keymap, self.state.host());
+    }
+
+    fn tutor_input(&mut self, input: tutor::Input, now: Instant) {
+        let Some(keymap) = &self.state.keymap else { return };
+        self.tutor.input(input, keymap, self.state.host(), now);
     }
 
     fn unlock_highlight(&self) -> &[(u8, u8)] {
@@ -234,7 +263,11 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
-            keyboard::show(ui, &self.state, now, keyboard::View { unlock_keys: self.unlock_highlight(), ..Default::default() });
+            keyboard::show(ui, &self.state, now, keyboard::View {
+                unlock_keys: self.unlock_highlight(),
+                fingers: self.tutor.colours_on && self.tutor.is_active(),
+                hint: self.tutor.hint(),
+            });
             return;
         }
         if self.worker_stopped {
@@ -305,8 +338,29 @@ impl eframe::App for App {
             match input {
                 FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
                 FocusedInput::Key(_) => {} // evdev already reported it
-                FocusedInput::Text(text) => self.state.on_text(&text),
-                FocusedInput::FocusLost => self.state.release_focused_keys(),
+                FocusedInput::Text(text) => {
+                    self.state.on_text(&text);
+                    if self.tutor.is_active() {
+                        // Text can carry several characters at once (IME, dead keys). Space
+                        // arrives here too, which is why `status::visible` has to special-case it.
+                        for c in text.chars() {
+                            self.tutor_input(tutor::Input::Char(c), now);
+                        }
+                    }
+                }
+                FocusedInput::Command(key) if self.tutor.is_active() => {
+                    let input = match key {
+                        egui::Key::Backspace => tutor::Input::Backspace,
+                        egui::Key::Enter => tutor::Input::Enter,
+                        _ => tutor::Input::Escape,
+                    };
+                    self.tutor_input(input, now);
+                }
+                FocusedInput::Command(_) => {}
+                FocusedInput::FocusLost => {
+                    self.state.release_focused_keys();
+                    self.tutor_input(tutor::Input::FocusLost, now);
+                }
             }
         }
     }
@@ -326,8 +380,14 @@ impl eframe::App for App {
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
             self.reload();
         }
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::T)) {
+            self.tutor.toggle();
+        }
 
         egui::Panel::bottom("status").show(ui, |ui| status::show(ui, self, now));
+        if self.tutor.is_active() {
+            egui::Panel::top("tutor").show(ui, |ui| tutor_panel::show(ui, self));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.central(ui, now));
         dialogs::show(ui.ctx(), self);
 
@@ -490,5 +550,20 @@ mod tests {
         drop(commands);
         app.start_unlock();
         assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
+    }
+
+    /// The tutor is unavailable until the keyboard's layout has been checked against the finger
+    /// map, and goes away again when the keyboard does.
+    #[test]
+    fn the_tutor_follows_the_keyboard() {
+        let (mut app, _events, _commands) = app(None);
+        assert_eq!(app.tutor.available(), &crate::tutor::Availability::NoKeyboard);
+        app.on_device_event(connected(), Instant::now());
+        // The 2x3 test keyboard is not a Lily58, so the finger map rejects it by design.
+        assert!(matches!(app.tutor.available(), crate::tutor::Availability::LayoutMismatch(_)));
+        app.tutor.toggle();
+        assert!(!app.tutor.is_active(), "it can't be opened against a layout it doesn't know");
+        app.on_device_event(DeviceEvent::Disconnected, Instant::now());
+        assert_eq!(app.tutor.available(), &crate::tutor::Availability::NoKeyboard);
     }
 }

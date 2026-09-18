@@ -38,6 +38,18 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
             ui.colored_label(Color32::from_rgb(230, 180, 40), format!("paused: {} has the keyboard open", holders.join(", ")));
         }
         ui.separator();
+        let blocked = app.tutor.available().reason().or_else(|| {
+            matches!(app.unlock, super::Unlock::InProgress { .. }).then(|| "Finish the unlock first.".to_string())
+        });
+        let label = if app.tutor.is_active() { "Close tutor (Ctrl+T)" } else { "Typing tutor (Ctrl+T)" };
+        let button = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
+        if button.clicked() {
+            app.tutor.toggle();
+        }
+        if let Some(why) = blocked {
+            button.on_hover_text(why);
+        }
+        ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
             app.reload();
         }
