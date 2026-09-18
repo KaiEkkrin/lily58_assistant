@@ -60,6 +60,7 @@ mod tests {
         assert_eq!(km.get(0, 4, 5), 0x00AE, "KC_MPLY at the unpopulated left position");
         assert_eq!(km.get(1, 8, 2), 0x022F, "LSFT(KC_LBRC) = {{ on layer 1");
         assert_eq!(km.get(1, 2, 5), 0x0032, "KC_NUHS = # on layer 1");
+        assert_eq!(km.get(2, 5, 1), 0x0452, "LALT(KC_UP): ALT is mod bit 0x04, so 0x0400 | 0x52");
         assert_eq!(km.get(3, 2, 3), 0x7847, "a raw RGB keycode passes through as hex");
         assert_eq!(km.get(1, 0, 0), 0x0001, "KC_TRNS");
         assert_eq!(km.get(1, 8, 5), 0x0000, "KC_NO");
