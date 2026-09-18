@@ -2152,7 +2152,6 @@ pub mod fixture;
 
 use std::time::Instant;
 
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::hostlayout::HostLayout;
