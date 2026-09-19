@@ -33,6 +33,13 @@ pub fn resolve(keymap: &Keymap, host: HostLayout, c: char) -> Option<KeyPath> {
                 let code = keymap.get(layer, row, col);
                 let Some(basic) = keycodes::tap_basic(code) else { continue };
                 let Some(&(_, shift)) = usages.iter().find(|&&(usage, _)| usage == basic) else { continue };
+                // A keycode that carries Shift can only serve a character that wants Shift.
+                // `LSFT(KC_EQL)` types `+`, never `=`, however well its usage matches — and on
+                // this keymap it sits one layer *below* the real `=`, so without this it won the
+                // lower-layer tie-break and the hint named LOWER for a RAISE-only character.
+                if !shift && keycodes::adds_shift(code) {
+                    continue;
+                }
                 let mut hold = Vec::new();
                 if layer != 0 {
                     let Some(key) = layer_key(keymap, layer) else { continue };
@@ -145,6 +152,49 @@ mod tests {
         assert_eq!(path(' '), KeyPath { key: (4, 1), hold: vec![] });
         assert_eq!(path('['), KeyPath { key: (4, 0), hold: vec![] });
         assert_eq!(path('g'), KeyPath { key: (2, 0), hold: vec![] });
+    }
+
+    /// `=` is `KC_EQL` on layer 2 at (8, 3). Layer 1 has `LSFT(KC_EQL)` at the very same position,
+    /// which types `+` — but it matches the same HID usage, so it used to win the lower-layer
+    /// tie-break and the hint named LOWER for a character only RAISE can type. `=` and `+` came
+    /// out with identical paths, which is impossible: one key plus one hold types one character.
+    #[test]
+    fn a_keycode_that_carries_shift_cannot_serve_an_unshifted_character() {
+        assert_eq!(path('='), KeyPath { key: (8, 3), hold: vec![(9, 3)] }, "RAISE holds MO(2) at (9,3)");
+        assert_eq!(path('+'), KeyPath { key: (8, 3), hold: vec![(4, 2)] }, "LOWER's pre-shifted key is right for +");
+        assert_eq!(path('\\'), KeyPath { key: (8, 0), hold: vec![(9, 3)] });
+        assert_eq!(path('|'), KeyPath { key: (8, 0), hold: vec![(4, 2)] });
+    }
+
+    /// Follow every hint literally — hold what it says, press what it says — and check the board
+    /// emits the character that was asked for. A whole-keymap oracle rather than another
+    /// hand-written expectation, and that is the point: it caught `=` and `\` without being told
+    /// where to look, while the tests above, each pinning one character, passed straight over them.
+    #[test]
+    fn every_hint_types_the_character_it_was_asked_for() {
+        let km = reference_keymap();
+        let mut chars: Vec<char> = (0x20u8..0x7f).map(|b| b as char).collect();
+        chars.extend(['£', '¬', '¦', '€']);
+        let mut wrong: Vec<String> = Vec::new();
+        for c in chars {
+            let Some(path) = resolve(&km, HostLayout::Gb, c) else { continue };
+            // What holding those keys down actually does, from the base layer.
+            let (mut layer, mut shift) = (0u8, false);
+            for &(row, col) in &path.hold {
+                match keycodes::decode(km.get(0, row, col)) {
+                    Action::Momentary(l) | Action::LayerTap { layer: l, .. } | Action::LayerMod { layer: l, .. } => layer = l,
+                    Action::Basic(b) if b == 0xE1 || b == 0xE5 => shift = true,
+                    Action::ModTap { mods, .. } if mods & 0x02 != 0 => shift = true,
+                    other => panic!("{c:?}: told to hold ({row},{col}), which is {other:?} — not a layer key or Shift"),
+                }
+            }
+            let code = km.get(layer, path.key.0, path.key.1);
+            let typed = keycodes::tap_basic(code).and_then(|b| HostLayout::Gb.char_for(b, shift || keycodes::adds_shift(code)));
+            if typed != Some(c) {
+                wrong.push(format!("{c:?}: hold {:?} then {:?} types {typed:?}", path.hold, path.key));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
     #[test]

@@ -357,6 +357,11 @@ Resolution for a character `c`:
    candidate's `hold` list — a Shift key if Shift is needed and the code does
    not already carry it (`keycodes::adds_shift`, which is how `KC_EXLM` needs no
    separate Shift), plus a layer key if the layer is not 0.
+
+   A matching usage is **not** sufficient on its own: the code's own Shift has to
+   agree with the character's. A code that carries Shift can only serve a
+   character that wants Shift, because `LSFT(KC_EQL)` types `+` and never `=`.
+   Both directions need checking, and only one of them is about adding a hold.
 3. **Pick the cheapest**: fewest holds, tie-broken by lower layer, then matrix
    order. Enumerating rather than reusing `Keymap::find_position` is what makes
    a preference possible at all. On the reference keymap `{` has three routes: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated

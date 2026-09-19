@@ -131,6 +131,19 @@ most of this):
   Shift drill. That is a property of the alphabet, not of this keymap, so the drill declares
   `Style::Syllables` rather than leaning on the thin-pool fallback and apologising on every batch.
   Recompute the pools before changing `words.txt` or a drill's groups.
+- **Matching a HID usage does not mean a key types the character.** `hint::resolve` picked
+  candidates by usage and then only asked the one question "does this character need Shift that the
+  keycode doesn't supply?", adding a Shift hold if so. The converse went unasked, so `LSFT(KC_EQL)`
+  was accepted as a route to `=`. This keymap puts the pre-shifted symbols on LOWER and their
+  unshifted twins on RAISE at the *same positions*, so the impostor sat one layer below the real
+  key and won the lower-layer tie-break: the hint said LOWER for a character only RAISE can type.
+  `=` and `+` resolved to byte-identical paths, which is impossible — one key plus one hold types
+  one character, and that equality is the cheapest way to spot this class of bug.
+  Still open, latent: `tap_basic` accepts `Action::Modded` for *any* modifier and `adds_shift`
+  reports only the Shift bit, so `LALT(KC_A)` would be offered as a route to `a`. Harmless on this
+  keymap — the only non-Shift modded codes are the `LALT` arrows on layer 2 row 5, which aren't
+  printable — but a keymap with `LALT(<letter>)` would need the guard widened to "no modifier
+  except a Shift the character requires".
 - **A per-item focus rule does not give you coverage.** "Keep an item if it uses at least one
   focus character" is satisfied by one letter, so it says nothing about the rest of the set. Every
   `Words` drill draws from a lowercase word list, so `Index reach` advertised `[ ] 5 6` in the
