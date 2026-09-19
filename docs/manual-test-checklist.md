@@ -35,8 +35,10 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Finger colours show with the tutor closed, and the status-bar checkbox turns them off.
 - [ ] Finger colours are legible on both the light and dark themes, and the two OLED positions
       are the only uncoloured keys.
-- [ ] With hints on, the Rust drill's `{` highlights the right-hand key *and* the left thumb
-      (MO(1)) at the same time; pressing the thumb turns it blue.
+- [ ] With hints on, the Rust drill's `{` highlights `.` *and* the left thumb (MO(1)) at the same
+      time; pressing the thumb turns it blue. Not Shift + `[` — the thumb is preferred to the pinky.
+- [ ] `!` hints LOWER + `a`, and `=` hints RAISE + `,`: both should feel more comfortable than the
+      Shift chords they replaced. This is the change to judge by feel rather than by test.
 - [ ] Alt+Tab away mid-batch for ten seconds and come back: the wpm hasn't collapsed.
 - [ ] Open Vial mid-batch: the status bar says paused, and the tutor keeps working.
 - [ ] Remap a key in Vial, close Vial: the drill picker shows the new character.

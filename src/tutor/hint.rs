@@ -15,18 +15,30 @@ pub struct KeyPath {
 
 /// The cheapest way to type `c` on this keymap, or `None` if it can't be typed.
 ///
-/// Cheapest means fewest keys held, tie-broken by the lower layer and then matrix order. Every
-/// candidate is enumerated rather than taking the first match, because a preference only exists
-/// if you can see them all: on the reference keymap `{` ties at one hold between Shift plus
-/// layer 0's `[` and layer 1's dedicated `LSFT(KC_LBRC)`, and the lower layer wins over the
-/// dedicated key. (`Keymap::find_position` still serves the OS-key inference it was written for;
-/// it stops at the first hit and knows nothing about Shift.)
+/// Cheapest means, in order:
+///
+/// 1. **Fewest keys held.**
+/// 2. **A layer key over Shift.** A layer key is a thumb and Shift is a pinky; pinky stretches
+///    pull the hand out of position, so `{` is LOWER + `.` rather than Shift + `[`.
+/// 3. **One finger from each hand over two of one hand.** Ordinary typing advice, and it decides
+///    between two layer chords: whichever thumb leaves the pressing hand alone.
+/// 4. **The lower layer, then matrix order** — nothing left to prefer, so this is for
+///    determinism.
+///
+/// All four read the live keymap: 2 and 3 come from `keycodes::decode` and `fingers::spot` at
+/// resolve time, so a remap in Vial changes the answer with no code change. Note that 2 outranks
+/// 3 — `!` goes to LOWER + `a`, one-handed but at rest, rather than Shift + `1`, which uses both
+/// hands but stretches the left pinky to the number row while the right holds Shift.
+///
+/// Every candidate is enumerated rather than taking the first match, because a preference only
+/// exists if you can see them all. (`Keymap::find_position` still serves the OS-key inference it
+/// was written for; it stops at the first hit and knows nothing about Shift.)
 pub fn resolve(keymap: &Keymap, host: HostLayout, c: char) -> Option<KeyPath> {
     let usages = host.usages_for(c);
     if usages.is_empty() {
         return None;
     }
-    let mut best: Option<(usize, u8, u8, u8, KeyPath)> = None;
+    let mut best: Option<(Rank, KeyPath)> = None;
     for layer in 0..keymap.layers() {
         for row in 0..keymap.rows() {
             for col in 0..keymap.cols() {
@@ -45,18 +57,32 @@ pub fn resolve(keymap: &Keymap, host: HostLayout, c: char) -> Option<KeyPath> {
                     let Some(key) = layer_key(keymap, layer) else { continue };
                     hold.push(key);
                 }
-                if shift && !keycodes::adds_shift(code) {
+                let needs_shift_key = shift && !keycodes::adds_shift(code);
+                if needs_shift_key {
                     let Some(key) = shift_key(keymap, (row, col)) else { continue };
                     hold.push(key);
                 }
-                let rank = (hold.len(), layer, row, col);
-                if best.as_ref().is_none_or(|b| rank < (b.0, b.1, b.2, b.3)) {
-                    best = Some((rank.0, rank.1, rank.2, rank.3, KeyPath { key: (row, col), hold }));
+                let rank = (hold.len(), needs_shift_key, one_handed((row, col), &hold), layer, row, col);
+                if best.as_ref().is_none_or(|(b, _)| rank < *b) {
+                    best = Some((rank, KeyPath { key: (row, col), hold }));
                 }
             }
         }
     }
-    best.map(|(.., path)| path)
+    best.map(|(_, path)| path)
+}
+
+/// Held keys, then Shift over a layer key, then one hand over two, then the lower layer and
+/// matrix order. Ascending on every term, which is why the two preferences are stored as the
+/// thing to avoid: `false` sorts before `true`.
+type Rank = (usize, bool, bool, u8, u8, u8);
+
+/// True when every key you hold is on the same hand as the key you press. Two fingers of one hand
+/// is the more awkward chord, so this loses a tie. A chord of one key is not one-handed in the
+/// sense that matters, and a position with no finger can't be judged.
+fn one_handed(key: (u8, u8), hold: &[(u8, u8)]) -> bool {
+    let hand = fingers::spot(key.0, key.1).map(|s| s.hand);
+    hand.is_some() && !hold.is_empty() && hold.iter().all(|&(r, c)| fingers::spot(r, c).map(|s| s.hand) == hand)
 }
 
 /// A key on **layer 0** that turns `layer` on while it is held, preferring hold-to-use kinds.
@@ -119,12 +145,14 @@ mod tests {
         resolve(&reference_keymap(), HostLayout::Gb, c).unwrap_or_else(|| panic!("{c:?} should resolve"))
     }
 
+    /// A thumb on a layer key beats a pinky on Shift when both cost one hold. `{` has three
+    /// routes: Shift plus layer 0's `[` at (4, 0), layer 1's dedicated `LSFT(KC_LBRC)` at (8, 2)
+    /// holding `MO(1)`, and layer 2's `[` plus Shift, which costs two. Of the two one-hold
+    /// routes, the layer key is a thumb and Shift is a pinky, so the dedicated key wins.
     #[test]
-    fn equal_cost_paths_prefer_the_lower_layer_even_against_a_dedicated_key() {
-        // `{` has three routes here. Shift plus layer 0's `[` at (4, 0) and layer 1's dedicated
-        // LSFT(KC_LBRC) at (8, 2) holding MO(1) both cost one hold, so the lower layer wins.
-        // Layer 2's `[` needs MO(2) and Shift, which is two.
-        assert_eq!(path('{'), KeyPath { key: (4, 0), hold: vec![(8, 0)] });
+    fn a_thumb_on_a_layer_key_beats_a_pinky_on_shift() {
+        assert_eq!(path('{'), KeyPath { key: (8, 2), hold: vec![(4, 2)] });
+        assert_eq!(path('}'), KeyPath { key: (8, 1), hold: vec![(4, 2)] });
     }
 
     /// `#` is only reachable as KC_NUHS on layer 1. This is the case that needs `usages_for` to
@@ -134,11 +162,34 @@ mod tests {
         assert_eq!(path('#'), KeyPath { key: (2, 5), hold: vec![(4, 2)] });
     }
 
-    /// `!` is LSFT(KC_1) on layer 1 and plain KC_1 on layer 0. Both cost one hold, so the lower
-    /// layer wins and the drill teaches Shift+1.
+    /// Avoiding the pinky outranks using both hands. `!` is `LSFT(KC_1)` on layer 1 at (2, 4) —
+    /// the `a` key — and plain `KC_1` on layer 0 at (0, 4). Both cost one hold. The Shift route
+    /// uses both hands but stretches the left pinky up to the number row while the right pinky
+    /// holds Shift; the layer route is the left thumb plus the left pinky *at rest*. One hand,
+    /// no stretch, and that is the more comfortable chord on this board.
     #[test]
-    fn equal_cost_paths_prefer_the_lower_layer() {
-        assert_eq!(path('!'), KeyPath { key: (0, 4), hold: vec![(8, 0)] });
+    fn avoiding_the_pinky_outranks_using_both_hands() {
+        assert_eq!(path('!'), KeyPath { key: (2, 4), hold: vec![(4, 2)] });
+        assert_eq!(path('£'), KeyPath { key: (2, 2), hold: vec![(4, 2)] }, "the same shape one finger over");
+    }
+
+    /// Between two layer chords, one finger from each hand beats two fingers of one hand. No
+    /// character on the reference keymap distinguishes the two rules — `+`'s cross-hand route is
+    /// also the lower-layer one — so this builds the case: `a` sits on layer 1 under a left-hand
+    /// key (same hand as `MO(1)`'s left thumb) and on layer 2 under another left-hand key (the
+    /// opposite hand from `MO(2)`'s right thumb). The lower layer alone would pick the one-handed
+    /// chord.
+    #[test]
+    fn between_layer_chords_one_finger_per_hand_wins() {
+        let mut codes = [KC_NO; 3 * 10 * 6];
+        let at = |layer: usize, row: usize, col: usize| (layer * 10 + row) * 6 + col;
+        codes[at(0, 4, 2)] = 0x5221; // MO(1) on a left thumb
+        codes[at(0, 9, 3)] = 0x5222; // MO(2) on a right thumb
+        codes[at(1, 2, 4)] = 0x0004; // KC_A on a left-hand key: one-handed with MO(1)
+        codes[at(2, 2, 3)] = 0x0004; // KC_A on a left-hand key: crosses hands with MO(2)
+        let buf: Vec<u8> = codes.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let km = Keymap::from_buffer(3, 10, 6, &buf).unwrap();
+        assert_eq!(resolve(&km, HostLayout::Gb, 'a'), Some(KeyPath { key: (2, 3), hold: vec![(9, 3)] }));
     }
 
     #[test]
@@ -195,6 +246,35 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("; "));
+    }
+
+    /// The reference keymap with one layer-0 key moved elsewhere.
+    fn with_layer_key_moved(from: (u8, u8), to: (u8, u8)) -> Keymap {
+        let km = reference_keymap();
+        let mut buf = Vec::new();
+        for layer in 0..km.layers() {
+            for row in 0..km.rows() {
+                for col in 0..km.cols() {
+                    let code = match (layer, (row, col)) {
+                        (0, at) if at == to => km.get(0, from.0, from.1),
+                        (0, at) if at == from => KC_NO,
+                        _ => km.get(layer, row, col),
+                    };
+                    buf.extend_from_slice(&code.to_be_bytes());
+                }
+            }
+        }
+        Keymap::from_buffer(km.layers(), km.rows(), km.cols(), &buf).unwrap()
+    }
+
+    /// None of this keymap is compiled in. Move `MO(1)` from the left thumb to the right half and
+    /// the hint for `{` names the thumb it moved to — the preferences are computed from the keymap
+    /// at resolve time, so a remap in Vial changes the answer without changing any code. The chord
+    /// is one-handed now, which rule 3 dislikes, but rule 2 outranks it and Shift is still a pinky.
+    #[test]
+    fn hints_follow_a_remapped_layer_key() {
+        let km = with_layer_key_moved((4, 2), (9, 2));
+        assert_eq!(resolve(&km, HostLayout::Gb, '{'), Some(KeyPath { key: (8, 2), hold: vec![(9, 2)] }));
     }
 
     #[test]

@@ -80,6 +80,11 @@ highlighted too, along with the Shift or layer key you need to hold to reach it,
 part a general-purpose typing tutor can't tell you about this keyboard; that one has its own
 checkbox in the panel.
 
+Where a character can be reached more than one way, it teaches the comfortable chord: a layer
+key under a thumb rather than Shift under a pinky, and one finger from each hand where there's
+a choice. On this keymap that means `{` is LOWER + `.`, not Shift + `[`. It's worked out from
+the keymap as read, so a remap changes the answer.
+
 Remap something in Vial, close Vial, and the drills follow the change: the assistant re-reads
 the keymap when the keyboard comes back.
 

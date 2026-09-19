@@ -362,13 +362,37 @@ Resolution for a character `c`:
    agree with the character's. A code that carries Shift can only serve a
    character that wants Shift, because `LSFT(KC_EQL)` types `+` and never `=`.
    Both directions need checking, and only one of them is about adding a hold.
-3. **Pick the cheapest**: fewest holds, tie-broken by lower layer, then matrix
-   order. Enumerating rather than reusing `Keymap::find_position` is what makes
-   a preference possible at all. On the reference keymap `{` has three routes: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated
-   `LSFT(KC_LBRC)` at `(8,2)` holding `MO(1)`, and layer 2's `[` plus Shift. The
-   first two cost one hold each, so the lower-layer tie-break decides and the hint
-   teaches Shift+`[`. The same rule makes `!` resolve to layer 0's Shift+1 rather
-   than layer 1's `LSFT(KC_1)`, which is what the Shift drill is for.
+3. **Pick the cheapest**, on four terms in order:
+
+   1. **Fewest keys held.**
+   2. **A layer key over Shift.** A layer key is a thumb; Shift is a pinky, and a
+      pinky stretch pulls the whole hand out of position. So `{` is LOWER + `.`
+      rather than Shift + `[`.
+   3. **One finger from each hand over two of one hand.** Ordinary typing advice.
+      It decides between two layer chords — which thumb leaves the pressing hand
+      alone.
+   4. **Lower layer, then matrix order.** Nothing left to prefer; this is for
+      determinism.
+
+   Terms 2 and 3 are computed from `keycodes::decode` and `fingers::spot` at
+   resolve time, so **a remap changes the answer with no code change**. Nothing
+   about a particular keymap is compiled in.
+
+   **Term 2 outranks term 3**, and that is a deliberate ordering rather than an
+   accident: `!` resolves to LOWER + `a` — one-handed, but the left pinky is at
+   rest — in preference to Shift + `1`, which uses both hands yet stretches that
+   pinky to the number row while the right one holds Shift. Pinky avoidance is
+   the point; hand balance is the refinement.
+
+   On the reference keymap this moves 13 characters off Shift and onto LOWER:
+   `!` `"` `£` `$` `%` land on the home row under the finger that would have
+   reached for the number, and `&` `(` `)` `*` `^` `_` `{` `}` become a left
+   thumb plus a right-hand key. Consequence to accept: the **Shift drill's
+   symbols are no longer taught with Shift** — only its capitals are, since no
+   layer on this board carries a shifted letter.
+
+   Enumerating rather than reusing `Keymap::find_position` is what makes any
+   preference possible at all.
 4. **Layer keys are searched on layer 0 only.** A key decoding to `Momentary` or
    `LayerTap` for the target layer is preferred, then `LayerMod`,
    `OneShotLayer`, `Toggle`, `TapToggle`, `To`. Searching all layers would be
@@ -640,10 +664,19 @@ keymap, and `hid::fake::SMALL_KEYMAP` is a 2x3 toy.
   character* (not necessarily the same usage; the keypad duplicates make that a
   deliberately weaker claim). Named cases: `#` yields both 0x31 and 0x32, `/`
   yields `KC_SLSH` before the keypad, `£` yields Shift+3, `A` yields Shift+`KC_A`.
-- **`hint.rs`** against the fixture keymap — `{` resolves to layer 0's `[` at
-  `(4,0)` plus Shift, beating layer 1's dedicated `{` on the lower-layer tie-break; `!` resolves to layer 0 Shift+1 rather than layer 1; the
-  Shift key chosen is on the opposite hand; a character only on layer 3 is
-  unreachable; space resolves to `(4,1)`.
+- **`hint.rs`** against the fixture keymap — `{` resolves to layer 1's dedicated
+  key at `(8,2)` holding `MO(1)`, beating Shift plus layer 0's `[`; `!` resolves
+  to LOWER + `a`, one-handed but unstretched; the Shift key chosen, where Shift is
+  still the answer, is on the opposite hand; a character only on layer 3 is
+  unreachable; space resolves to `(4,1)`. Two tests carry their own synthetic
+  keymaps, because the reference board cannot distinguish the rules they pin:
+  one where the cross-hand route is on the *higher* layer, and one that moves
+  `MO(1)` to the other half and expects the hint to follow it.
+- **A whole-keymap oracle** — every printable character's hint is followed
+  literally: reconstruct the layer and Shift state from its `hold`, press its
+  `key`, and require the board to emit the character asked for. This is what
+  catches a preference that picks an impossible route, and it found two wrong
+  hints (`=` and `\`) that eight single-character tests had passed over.
 - **`generate.rs`** — seeded `StdRng`, exact expected batch strings, plus
   invariants over many seeds: every character is in the drill's alphabet, every
   item satisfies `focus`, `shift: Required` batches contain shifted characters,

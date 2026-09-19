@@ -109,13 +109,24 @@ most of this):
   hint. Restricting the search to layer 0 makes hints correct by construction and treats anything
   deeper as unreachable. Nothing is lost on this keymap: layer 3 is RGB controls and `KC_NO`.
   This is also why there is no tri-layer branch in `hint.rs`.
-- **Cheapest-path picking pays for itself, and the tie-break does real work.** `{` has three
-  routes on this keymap: Shift plus layer 0's `[` at `(4,0)`, layer 1's dedicated
-  `LSFT(KC_LBRC)` at `(8,2)` holding `MO(1)`, and layer 2's `[` plus Shift. The first two both
-  cost one hold, so the lower-layer tie-break decides and the hint teaches Shift+`[`. The same
-  rule makes `!` resolve to layer 0's Shift+1 rather than layer 1's `LSFT(KC_1)`, which is what
-  the Shift drill is for. To teach dedicated layer keys instead, invert the layer term in the
-  rank tuple in `hint::resolve` — but that flips `!` too.
+- **The hint prefers a thumb to a pinky, and that is a comfort judgement, not a cost one.** All
+  three of `{`'s routes cost one hold — Shift plus layer 0's `[`, layer 1's dedicated
+  `LSFT(KC_LBRC)` holding `MO(1)`, and layer 2's `[` plus Shift (two, in fact) — so hold-counting
+  cannot separate them. The rank tuple in `hint::resolve` therefore ranks a layer key above Shift,
+  then one-finger-per-hand above two-of-one-hand, before falling through to the lower layer for
+  determinism. On this board that moves 13 characters off Shift: `! " £ $ %` onto the home row
+  under the same finger, and `& ( ) * ^ _ { }` onto a left thumb plus a right-hand key.
+  Two things worth knowing about that ordering. **Pinky avoidance beats hand balance on purpose** —
+  `!` goes to LOWER + `a`, one-handed, rather than Shift + `1`, which uses both hands but stretches
+  the left pinky to the number row while the right holds Shift. And **the Shift drill no longer
+  teaches Shift for its symbols**; its capitals still do, because no layer here carries a shifted
+  letter. If that ever feels wrong, the fix is a drill-aware preference, not a change to the rank.
+- **Two hint rules need synthetic keymaps to test, because this board can't tell them apart.**
+  `+`'s cross-hand route is also its lower-layer route, so nothing here separates rule 3 from rule
+  4; and nothing here separates "reads the keymap" from "knows this keymap". So one test builds a
+  keymap whose cross-hand route is on the *higher* layer, and another moves `MO(1)` to the right
+  half and requires the hint to name the thumb it moved to. Checking a rule against the one board
+  that cannot exercise it is how a rule quietly becomes a coincidence.
 - **A batch is abandoned on any `DeviceEvent::Connected`, not just on Reload.** Both
   `DeviceCommand::Reload` and resuming after another program releases the device set
   `Session::loaded = false` and re-read the keymap, so a remap made in Vial arrives without a
