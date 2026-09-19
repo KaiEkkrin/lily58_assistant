@@ -19,6 +19,12 @@ const MIN_WORD_POOL: usize = 12;
 /// Fewer typeable keys than this and the drill teaches nothing.
 const MIN_LETTERS: usize = 4;
 const MIN_FOCUS: usize = 2;
+/// How often a `Words` batch spends an item on a focus character the word list can't spell.
+/// Every third item: often enough to work through a small set within one batch, rare enough that
+/// the text still reads like words. One in two once the set is large, because the Shift drill has
+/// 24 such characters — far more than a batch can reach at the slower rate.
+const COVER_IN: u32 = 3;
+const MANY_UNCOVERED: usize = 8;
 
 pub const SYLLABLE_NOTE: &str = "Not enough words on this keymap for this drill, so it's letter groups instead.";
 
@@ -144,12 +150,26 @@ pub fn keys_text(drill: &Drill, alpha: &Alphabet, rng: &mut impl RngExt) -> Resu
         Style::Words => (false, Some(SYLLABLE_NOTE)),
         Style::Syllables => (false, None),
     };
+    // Focus characters the pool can't spell need items of their own, or the picker advertises
+    // keys the drill never asks for — which is what "Index reach" did with `[ ] 5 6`.
+    let uncovered = if words { uncovered_focus(alpha, &pool, drill) } else { Vec::new() };
+    let cover_in = if uncovered.len() > MANY_UNCOVERED { COVER_IN - 1 } else { COVER_IN };
+    // A rotation from a random start, not a fresh pick each time: a pick can land on the same
+    // character twice and leave another out, and coverage is the whole point of these items.
+    let mut turn = if uncovered.is_empty() { 0 } else { rng.random_range(0..uncovered.len()) };
     let mut text = String::new();
     while text.chars().count() < BATCH_CHARS {
         if !text.is_empty() {
             text.push(' ');
         }
-        let item = if words { word_item(&pool, drill, rng) } else { syllable_item(alpha, drill, &focus, rng) };
+        let item = if !words {
+            syllable_item(alpha, drill, &focus, rng)
+        } else if !uncovered.is_empty() && rng.random_range(0..cover_in) == 0 {
+            turn += 1;
+            cover_item(&pool, alpha, drill, uncovered[(turn - 1) % uncovered.len()], rng)
+        } else {
+            word_item(&pool, drill, rng)
+        };
         text.push_str(&item);
     }
     Ok((text, note))
@@ -191,6 +211,61 @@ fn word_pool(alpha: &Alphabet) -> Vec<&'static str> {
         .filter(|w| w.chars().all(|c| chars.contains(&c)))
         .filter(|w| w.chars().any(|c| focus.contains(&c)))
         .collect()
+}
+
+/// Focus characters no item built from the word pool can contain. `words.txt` is lowercase
+/// letters, so for a drill that reaches the digits and symbols this is most of what it
+/// advertises. `word_item` capitalises when the drill allows Shift, so the upper case of a
+/// pooled letter is in reach and doesn't belong here.
+fn uncovered_focus(alpha: &Alphabet, pool: &[&'static str], drill: &Drill) -> Vec<char> {
+    let mut spellable: Vec<char> = Vec::new();
+    for word in pool {
+        for c in word.chars() {
+            push_once(&mut spellable, c);
+            if drill.shift != Shift::Never {
+                for upper in c.to_uppercase() {
+                    push_once(&mut spellable, upper);
+                }
+            }
+        }
+    }
+    alpha.focus_chars().into_iter().filter(|c| !spellable.contains(c)).collect()
+}
+
+fn push_once(chars: &mut Vec<char>, c: char) {
+    if !chars.contains(&c) {
+        chars.push(c);
+    }
+}
+
+/// One character the word pool can't spell, in the shape it is actually typed: wrapping a word
+/// when it is half of a pair this keymap has, otherwise attached to one. `[bank]` is how a
+/// bracket arrives in code; a loose `[` between two words is not. The word comes from
+/// `word_item`, so a `Shift::Required` drill still gets its capital in every item.
+fn cover_item(pool: &[&'static str], alpha: &Alphabet, drill: &Drill, ch: char, rng: &mut impl RngExt) -> String {
+    let word = word_item(pool, drill, rng);
+    match pair(ch) {
+        Some((open, close)) if alpha.chars().any(|c| c == open) && alpha.chars().any(|c| c == close) => {
+            format!("{open}{word}{close}")
+        }
+        // Currency and the like lead; punctuation, closers and digits follow.
+        _ if matches!(ch, '$' | '£' | '#' | '@' | '&' | '~' | '%' | '\\') => format!("{ch}{word}"),
+        _ => format!("{word}{ch}"),
+    }
+}
+
+/// The bracket or quote pair this character belongs to, opener first. Wrapping covers both
+/// halves at once, which is why the pair matters and not just the character.
+fn pair(ch: char) -> Option<(char, char)> {
+    match ch {
+        '[' | ']' => Some(('[', ']')),
+        '(' | ')' => Some(('(', ')')),
+        '{' | '}' => Some(('{', '}')),
+        '<' | '>' => Some(('<', '>')),
+        '"' => Some(('"', '"')),
+        '\'' => Some(('\'', '\'')),
+        _ => None,
+    }
 }
 
 fn word_item(pool: &[&'static str], drill: &Drill, rng: &mut impl RngExt) -> String {
@@ -291,6 +366,57 @@ mod tests {
             .map(|ch| Letter { ch, hand: Some(Hand::Left), shifted: false, focus: ch != ' ' })
             .collect();
         Alphabet { letters }
+    }
+
+    /// The picker advertises `focus_chars()`, so the drill has to ask for them. Restricted to the
+    /// non-letters because that is the class the word list structurally cannot reach — it is
+    /// lowercase words, so `[`, `]`, `5` and `6` were advertised by "Index reach" and never
+    /// typed, and every digit and symbol by "Shift combinations". An advertised *letter* can be
+    /// rare without being unreachable: `z` is in one word of the 296-word pool, and English
+    /// frequency deciding how often it comes up is correct, not a defect.
+    ///
+    /// Over a run of batches rather than one: "Shift combinations" advertises 24 non-letters and
+    /// a 110-character batch can't hold them all and still read like text.
+    #[test]
+    fn every_position_drill_asks_for_the_symbols_it_advertises() {
+        let km = reference_keymap();
+        let mut rng = seeded();
+        let mut complaints: Vec<String> = Vec::new();
+        for id in drills::ids_of(drills::Kind::Position) {
+            let drill = drills::drill(id);
+            let advertised: Vec<char> =
+                alphabet(drill, &km, HostLayout::Gb).focus_chars().into_iter().filter(|c| !c.is_alphabetic()).collect();
+            let mut seen: Vec<char> = Vec::new();
+            for _ in 0..40 {
+                let batch = batch(drill, &km, HostLayout::Gb, &mut rng).expect("the reference keymap runs every drill");
+                seen.extend(batch.target.iter().copied());
+            }
+            let missing: String = advertised.iter().copied().filter(|c| !seen.contains(c)).collect();
+            if !missing.is_empty() {
+                complaints.push(format!("\"{}\" advertises {missing:?} and never asks for it", drill.name));
+            }
+        }
+        assert!(complaints.is_empty(), "{}", complaints.join("; "));
+    }
+
+    /// A bracket is typed around something, so the item that covers it is `[word]` and not a
+    /// loose `[` sitting between two words. The coverage test above is satisfied either way,
+    /// which is why the shape needs its own.
+    #[test]
+    fn brackets_arrive_wrapped_around_a_word() {
+        let km = reference_keymap();
+        let mut rng = seeded();
+        let mut wrapped = 0;
+        for _ in 0..20 {
+            let batch = batch(find("Index reach"), &km, HostLayout::Gb, &mut rng).expect("the reference keymap runs this drill");
+            let text: String = batch.target.iter().collect();
+            for item in text.split(' ').filter(|i| i.contains('[') || i.contains(']')) {
+                let inner = item.strip_prefix('[').and_then(|i| i.strip_suffix(']'));
+                assert!(inner.is_some_and(|i| !i.is_empty()), "{item:?} is not a word in brackets");
+                wrapped += 1;
+            }
+        }
+        assert!(wrapped > 0, "the drill has [ and ] in its alphabet, so some item should use them");
     }
 
     #[test]

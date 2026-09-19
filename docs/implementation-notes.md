@@ -131,6 +131,16 @@ most of this):
   Shift drill. That is a property of the alphabet, not of this keymap, so the drill declares
   `Style::Syllables` rather than leaning on the thin-pool fallback and apologising on every batch.
   Recompute the pools before changing `words.txt` or a drill's groups.
+- **A per-item focus rule does not give you coverage.** "Keep an item if it uses at least one
+  focus character" is satisfied by one letter, so it says nothing about the rest of the set. Every
+  `Words` drill draws from a lowercase word list, so `Index reach` advertised `[ ] 5 6` in the
+  picker and could not type any of them — the letters `t g b y h n` satisfied the rule every time
+  — and `Shift combinations` advertised 24 digits and symbols while emitting only capitalised
+  words. `5` and `6` were asked for by nothing in the catalogue at all. The fix is cover items
+  (`generate::cover_item`); the guard is the test that every advertised **non-letter** turns up
+  over a run of batches. Non-letters specifically: an advertised letter can be rare without being
+  unreachable — `z` is in one word of the 296-word pool, and English frequency deciding how often
+  it comes up is correct, not a defect.
 - **The ten-colour palette has not been validated across themes.** The colours in
   `ui::keyboard::finger_colour` are a starting point and need an eyeball check as thin strokes
   against both the light and dark egui themes. They are on by default and no longer confined to

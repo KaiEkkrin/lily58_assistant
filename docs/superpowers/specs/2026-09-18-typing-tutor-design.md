@@ -224,6 +224,13 @@ struct Drill {
 The alphabet is drawn from everything in `include`; an item is kept only if it
 uses at least one character from `focus`. So "stretch up" mixes the top row with
 home keys already known, while guaranteeing every item exercises the top row.
+
+That per-item rule is necessary but **not sufficient**: it is satisfied by one
+focus character, so it says nothing about the rest of the focus set. A `Words`
+drill draws from a lowercase word list and so cannot type a digit or a symbol at
+all, however prominently the picker advertises it. Covering that is the job of
+the cover items below, and the invariant is: **every non-letter a drill
+advertises must appear over a run of its batches.**
 `Group` is conjunctive so that `{band: Home, reach: Normal}` means the eight
 home keys, with G, H and the modifiers excluded rather than argued about.
 
@@ -231,7 +238,7 @@ home keys, with G, H and the modifiers excluded rather than argued about.
 |---|---|---|---|---|
 | Home keys | `{Home, Normal}` | `{Home, Normal}` | Never | Syllables |
 | Stretch up | `{Home, Normal}`, `{Top, Normal}` | `{Top, Normal}` | Never | Words |
-| Stretch down | `{Home, Normal}`, `{Bottom, Normal}` | `{Bottom, Normal}` | Never | Words |
+| Stretch down | `{Home, Normal}`, `{Bottom, Normal}` | `{Bottom, Normal}` | Never | Syllables |
 | Number row | `{Home, Normal}`, `{Number, Normal}` | `{Number, Normal}` | Never | Syllables |
 | Outer column | `{Home, Normal}`, `{_, Outward}` | `{_, Outward}` | Allowed | Syllables |
 | Index reach | `{Home, Normal}`, `{_, Inward}` | `{_, Inward}` | Never | Words |
@@ -283,6 +290,21 @@ drilled for free with a hint pointing at the right thumb key.
 then keep those satisfying `focus`. For `shift: Required` apply a capitalisation
 pattern per word (leading cap, all caps, or one interior cap); for `Allowed`, to
 about a fifth of them.
+
+**Cover items.** The focus characters no pooled word can spell — digits and
+symbols, since the word list is letters — get items of their own, every third
+item, or every second once there are more than eight of them. Taken as a
+rotation from a random start, so a batch works through the set rather than
+landing twice on one character and missing another. Each is a pooled word (via
+the same capitalisation rule, so a `Required` drill keeps its shifted character
+in every item) either **wrapped** by the character when it is half of a bracket
+or quote pair the keymap has, or with the character attached — leading for
+currency and the like, trailing for punctuation, closers and digits. `[bank]` is
+how a bracket arrives in code; a loose `[` between two words is not.
+
+Without these, "Index reach" advertised `[ ] 5 6` and drilled none of them, and
+"Shift combinations" advertised every digit and symbol while typing nothing but
+capitalised words. `5` and `6` were asked for by no drill in the catalogue.
 
 **Syllables.** 2-6 characters from the alphabet, weighted toward 3-4, with two
 shaping rules: never the same key twice running, and prefer alternating hands
