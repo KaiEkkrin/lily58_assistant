@@ -55,6 +55,14 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
             // while active: `on_disabled_hover_text` shows nothing on an enabled widget.
             button.on_disabled_hover_text(why);
         }
+        // Beside the tutor button because that is where it used to live, but it applies to the
+        // picture whether the tutor is open or not — so it has to be reachable with it closed.
+        // Owned before the checkbox borrows `app` mutably.
+        let colours_blocked = app.finger_colours_blocked().map(str::to_owned);
+        let colours = ui.add_enabled(colours_blocked.is_none(), egui::Checkbox::new(&mut app.finger_colours, "Finger colours"));
+        if let Some(why) = colours_blocked {
+            colours.on_disabled_hover_text(why);
+        }
         ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
             app.reload();

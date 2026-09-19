@@ -21,7 +21,7 @@ most of this):
   firmware supports that a given build need not populate: the PCB takes rotary encoders there,
   and the reference board has OLED screens instead. The keymap still assigns them something
   (`KC_MPLY` and `KC_MUTE`), so they appear on the picture as ordinary keys. The typing tutor
-  gives them no finger, so they are the only uncoloured keys while it is open.
+  gives them no finger, so they are the only keys the colours leave on the plain hairline.
   Its four encoder-rotation entries (`e` in the label) are skipped because they have no matrix
   position.
 - The left half's matrix columns run **from the inside out**: `0,0` is the "5"
@@ -133,7 +133,14 @@ most of this):
   Recompute the pools before changing `words.txt` or a drill's groups.
 - **The ten-colour palette has not been validated across themes.** The colours in
   `ui::keyboard::finger_colour` are a starting point and need an eyeball check as thin strokes
-  against both the light and dark egui themes.
+  against both the light and dark egui themes. They are on by default and no longer confined to
+  the tutor, so this is now the picture's ordinary appearance, not a mode's.
+- The finger colours are **not** a tutor setting. They live on `App` (`finger_colours`, with the
+  checkbox in the status bar) because they apply to the picture whenever it is drawn, and a
+  toggle inside the tutor panel would be unreachable with the tutor closed. What they do share
+  with the tutor is the layout check: `fingers::spot` is keyed by matrix position, so on a board
+  the finger map doesn't describe, the colours would name the wrong finger. `Availability` gates
+  both.
 
 ## Testing lesson
 

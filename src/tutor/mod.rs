@@ -76,7 +76,6 @@ pub struct Session {
     /// route into it — the picker's buttons, Enter, a restart — reports failure the same way.
     start_error: Option<StartError>,
     pub hints_on: bool,
-    pub colours_on: bool,
 }
 
 impl Default for Session {
@@ -95,7 +94,6 @@ impl Session {
             totals: Totals::default(),
             start_error: None,
             hints_on: true,
-            colours_on: true,
         }
     }
 

@@ -33,7 +33,6 @@ fn header(ui: &mut egui::Ui, app: &mut App) {
         ui.label(RichText::new("Typing tutor").strong());
         ui.separator();
         ui.checkbox(&mut app.tutor.hints_on, "Next-key hints");
-        ui.checkbox(&mut app.tutor.colours_on, "Finger colours");
     });
 }
 

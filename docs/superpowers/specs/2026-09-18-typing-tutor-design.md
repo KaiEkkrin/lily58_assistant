@@ -536,8 +536,12 @@ dark egui themes before it is final. Implementation should start from a
 mid-saturation categorical set and adjust; this is the fiddly part of the
 feature and should not be assumed done because it compiles.
 
-Colours show whenever the tutor is active, including while choosing a drill,
-with a toggle in the panel. They never show when it is closed.
+Colours show whenever the keyboard picture is drawn — the tutor does not have to
+be open — with a toggle in the status bar, beside the tutor button, so it is
+reachable with the tutor closed. The one exception is a keyboard whose layout
+does not match the finger map: the colours are keyed by matrix position, so
+there they would name the wrong finger, and the same check that blocks the tutor
+withholds them, with the reason on the disabled checkbox.
 
 ### Next-key hints
 

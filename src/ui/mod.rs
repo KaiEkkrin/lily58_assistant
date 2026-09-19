@@ -53,6 +53,9 @@ pub struct App {
     /// The device worker's channel has closed; reported once.
     worker_stopped: bool,
     show_hints: bool,
+    /// Outline every key in its finger's colour. A picture preference, not a tutor one: it
+    /// holds whether or not the tutor is open, so it lives here rather than on `Session`.
+    finger_colours: bool,
     tutor: Session,
     /// Everything typed into the window since the last `logic` call, copied in
     /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
@@ -112,6 +115,7 @@ impl App {
             config_error,
             worker_stopped: false,
             show_hints: false,
+            finger_colours: true,
             tutor: Session::new(),
             typed: Vec::new(),
             typed_seen: Vec::new(),
@@ -257,6 +261,24 @@ impl App {
         self.tutor.input(input, keymap, self.state.host(), now);
     }
 
+    /// Whether to outline every key in its finger's colour. Independent of the tutor: the
+    /// colours are useful while just looking at the picture. They do depend on the keyboard
+    /// matching the hardwired finger map, though — on one that doesn't, they would name the
+    /// wrong fingers, so the same check that blocks the tutor withholds them.
+    fn finger_colours_shown(&self) -> bool {
+        self.finger_colours && matches!(self.tutor.available(), Availability::Ready)
+    }
+
+    /// Why the finger colours can't be drawn, for the disabled checkbox. Only a layout mismatch
+    /// counts: with no keyboard there is no picture to colour, and an unlock in progress doesn't
+    /// make the finger map wrong.
+    fn finger_colours_blocked(&self) -> Option<&str> {
+        match self.tutor.available() {
+            Availability::LayoutMismatch(why) => Some(why),
+            _ => None,
+        }
+    }
+
     /// Why the tutor can't be opened right now, if it can't. An unlock needs two keys held for
     /// ten seconds and can't be cancelled, so it must not overlap a drill — but this gates
     /// opening only: an already-open tutor must always be closable.
@@ -310,7 +332,7 @@ impl App {
         if self.state.layout.is_some() {
             keyboard::show(ui, &self.state, now, keyboard::View {
                 unlock_keys: self.unlock_highlight(),
-                fingers: self.tutor.colours_on && self.tutor.is_active(),
+                fingers: self.finger_colours_shown(),
                 hint: self.tutor.hint(),
             });
             return;
@@ -610,6 +632,29 @@ mod tests {
     /// unlock in progress can't be cancelled and must not overlap a drill, but before this it was
     /// checked only by the button — Ctrl+T called `Session::toggle` unconditionally and opened
     /// the tutor right past a running unlock.
+    /// The colours outline the picture whenever it's drawn — the tutor doesn't have to be open.
+    #[test]
+    fn finger_colours_show_without_the_tutor() {
+        let (mut app, _events, _commands) = app(None);
+        assert!(!app.finger_colours_shown(), "no keyboard, so no picture to colour");
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert!(!app.tutor.is_active(), "the tutor starts closed");
+        assert!(app.finger_colours_shown(), "and the colours show anyway");
+        app.finger_colours = false;
+        assert!(!app.finger_colours_shown(), "the checkbox still turns them off");
+    }
+
+    /// The colours come from a table keyed by matrix position, so on a keyboard that isn't this
+    /// one they would name the wrong fingers. The 2x3 test board is exactly that case.
+    #[test]
+    fn a_layout_that_isnt_a_lily58_gets_no_finger_colours() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected(), Instant::now());
+        assert!(app.finger_colours, "the preference is still on");
+        assert!(!app.finger_colours_shown(), "but the finger map doesn't describe this keyboard");
+        assert!(app.finger_colours_blocked().is_some(), "and the disabled checkbox says why");
+    }
+
     #[test]
     fn tutor_blocked_reports_an_unlock_in_progress() {
         let (mut app, _events, _commands) = app(None);

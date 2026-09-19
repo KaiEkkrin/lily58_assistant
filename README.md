@@ -74,10 +74,11 @@ outer column, the index reach, and Shift combinations — and five drill the pun
 writing Markdown, HTML, Rust, TypeScript or Elixir. Each batch is generated fresh, so you never
 learn the text instead of the keys.
 
-While it's open, every key is outlined in its finger's colour, and the next key to press is
-highlighted — along with the Shift or layer key you need to hold to reach it, which is the part
-a general-purpose typing tutor can't tell you about this keyboard. Both can be turned off in the
-panel.
+Every key is outlined in its finger's colour, tutor or no tutor — the checkbox beside the
+button in the status bar turns that off. While a drill is running, the next key to press is
+highlighted too, along with the Shift or layer key you need to hold to reach it, which is the
+part a general-purpose typing tutor can't tell you about this keyboard; that one has its own
+checkbox in the panel.
 
 Remap something in Vial, close Vial, and the drills follow the change: the assistant re-reads
 the keymap when the keyboard comes back.

@@ -32,6 +32,7 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
       reason** (this needs `on_disabled_hover_text`; no test can observe a tooltip).
 - [ ] "Home keys" generates a fresh batch each time; typing fills the second line, wrong
       characters go red, and backspace takes them back without erasing the error count.
+- [ ] Finger colours show with the tutor closed, and the status-bar checkbox turns them off.
 - [ ] Finger colours are legible on both the light and dark themes, and the two OLED positions
       are the only uncoloured keys.
 - [ ] With hints on, the Rust drill's `{` highlights the right-hand key *and* the left thumb
