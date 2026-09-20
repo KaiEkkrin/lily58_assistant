@@ -14,5 +14,6 @@ pub mod layers;
 pub mod probe;
 pub mod protocol;
 pub mod state;
+pub mod tutor;
 pub mod ui;
 pub mod vial;

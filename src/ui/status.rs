@@ -38,6 +38,32 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
             ui.colored_label(Color32::from_rgb(230, 180, 40), format!("paused: {} has the keyboard open", holders.join(", ")));
         }
         ui.separator();
+        let blocked = app.tutor_blocked();
+        let active = app.tutor.is_active();
+        let label = if active { "Close tutor (Ctrl+T)" } else { "Typing tutor (Ctrl+T)" };
+        // An already-open tutor stays enabled even if an unlock starts while it's open (the
+        // keyboard can be locked by another program, or one already running at connect) — it
+        // must always be closable. Only an inactive, blocked tutor is disabled.
+        let button = ui.add_enabled(active || blocked.is_none(), egui::Button::new(label));
+        if button.clicked() {
+            app.tutor.toggle();
+        }
+        if let Some(why) = blocked {
+            // The button is only ever disabled when there is a reason, and `on_hover_text`
+            // deliberately shows nothing on a disabled widget — so this has to be the
+            // disabled-specific variant or the reason never reaches the user. Harmless to call
+            // while active: `on_disabled_hover_text` shows nothing on an enabled widget.
+            button.on_disabled_hover_text(why);
+        }
+        // Beside the tutor button because that is where it used to live, but it applies to the
+        // picture whether the tutor is open or not — so it has to be reachable with it closed.
+        // Owned before the checkbox borrows `app` mutably.
+        let colours_blocked = app.finger_colours_blocked().map(str::to_owned);
+        let colours = ui.add_enabled(colours_blocked.is_none(), egui::Checkbox::new(&mut app.finger_colours, "Finger colours"));
+        if let Some(why) = colours_blocked {
+            colours.on_disabled_hover_text(why);
+        }
+        ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
             app.reload();
         }

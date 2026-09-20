@@ -63,6 +63,31 @@ Vial only reports the switch matrix after its physical unlock. In the assistant,
 
 An unlock can't be cancelled once started: until it completes, the keyboard answers nothing else over raw HID. To abort, unplug the keyboard. Vial behaves the same way.
 
+## Typing tutor
+
+Press **Ctrl+T** (or the button in the status bar) for drill mode. It only reads keys typed into
+the assistant's own window, and it needs the keyboard connected, because every drill is built
+from your actual keymap.
+
+Seven drills select keys by position — home keys, stretch up, stretch down, the number row, the
+outer column, the index reach, and Shift combinations — and five drill the punctuation you hit
+writing Markdown, HTML, Rust, TypeScript or Elixir. Each batch is generated fresh, so you never
+learn the text instead of the keys.
+
+Every key is outlined in its finger's colour, tutor or no tutor — the checkbox beside the
+button in the status bar turns that off. While a drill is running, the next key to press is
+highlighted too, along with the Shift or layer key you need to hold to reach it, which is the
+part a general-purpose typing tutor can't tell you about this keyboard; that one has its own
+checkbox in the panel.
+
+Where a character can be reached more than one way, it teaches the comfortable chord: a layer
+key under a thumb rather than Shift under a pinky, and one finger from each hand where there's
+a choice. On this keymap that means `{` is LOWER + `.`, not Shift + `[`. It's worked out from
+the keymap as read, so a remap changes the answer.
+
+Remap something in Vial, close Vial, and the drills follow the change: the assistant re-reads
+the keymap when the keyboard comes back.
+
 ## Configuration
 
 Optional: `~/.config/lily58-assistant/config.toml` (or `$XDG_CONFIG_HOME/lily58-assistant/config.toml`):

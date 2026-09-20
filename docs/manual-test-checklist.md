@@ -26,6 +26,25 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Transparent keys show the lower layer's label, dimmed.
 - [ ] The status bar shows "Layer N" and "all windows, live layers".
 
+## Typing tutor
+- [ ] Ctrl+T opens the panel; every position drill lists the characters it currently resolves to.
+- [ ] With the keyboard unplugged, the tutor button is disabled and **hovering it shows the
+      reason** (this needs `on_disabled_hover_text`; no test can observe a tooltip).
+- [ ] "Home keys" generates a fresh batch each time; typing fills the second line, wrong
+      characters go red, and backspace takes them back without erasing the error count.
+- [ ] Finger colours show with the tutor closed, and the status-bar checkbox turns them off.
+- [ ] Finger colours are legible on both the light and dark themes, and the two OLED positions
+      are the only uncoloured keys.
+- [ ] With hints on, the Rust drill's `{` highlights `.` *and* the left thumb (MO(1)) at the same
+      time; pressing the thumb turns it blue. Not Shift + `[` — the thumb is preferred to the pinky.
+- [ ] `!` hints LOWER + `a`, and `=` hints RAISE + `,`: both should feel more comfortable than the
+      Shift chords they replaced. This is the change to judge by feel rather than by test.
+- [ ] Alt+Tab away mid-batch for ten seconds and come back: the wpm hasn't collapsed.
+- [ ] Open Vial mid-batch: the status bar says paused, and the tutor keeps working.
+- [ ] Remap a key in Vial, close Vial: the drill picker shows the new character.
+- [ ] Ctrl+R mid-batch returns to the drill picker.
+- [ ] Unplug the keyboard mid-batch: the panel closes and the button says why.
+
 ## Robustness
 - [ ] Opening Vial while the assistant runs shows "paused: vial (…) has the keyboard open", and Vial works normally. Closing Vial makes the assistant reconnect.
 - [ ] Remapping a key in Vial, then closing Vial, shows the new label after the reconnect.

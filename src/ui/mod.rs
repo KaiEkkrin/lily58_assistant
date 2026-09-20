@@ -3,6 +3,7 @@
 mod dialogs;
 pub mod keyboard;
 mod status;
+mod tutor_panel;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -16,6 +17,8 @@ use crate::input::InputMsg;
 use crate::input::evdev::{self as evdev_input, EvdevStatus};
 use crate::input::focused::{self, FocusedInput};
 use crate::state::AppState;
+use crate::tutor::{self, Availability, Session};
+use crate::tutor::drills;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Connection {
@@ -50,6 +53,10 @@ pub struct App {
     /// The device worker's channel has closed; reported once.
     worker_stopped: bool,
     show_hints: bool,
+    /// Outline every key in its finger's colour. A picture preference, not a tutor one: it
+    /// holds whether or not the tutor is open, so it lives here rather than on `Session`.
+    finger_colours: bool,
+    tutor: Session,
     /// Everything typed into the window since the last `logic` call, copied in
     /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
     /// eframe calls exactly once per hook call on both the visible and hidden paths.
@@ -108,6 +115,8 @@ impl App {
             config_error,
             worker_stopped: false,
             show_hints: false,
+            finger_colours: true,
+            tutor: Session::new(),
             typed: Vec::new(),
             typed_seen: Vec::new(),
             device_rx,
@@ -140,7 +149,17 @@ impl App {
             DeviceEvent::Connected { info, layout, keymap } => {
                 self.connection = Connection::Connected;
                 self.error = None;
+                // Check the layout against the finger map before it moves into the state.
+                let availability = match tutor::fingers::validate(&layout) {
+                    Ok(()) => Availability::Ready,
+                    Err(why) => Availability::LayoutMismatch(why),
+                };
                 self.state.set_keyboard(layout, keymap);
+                self.tutor.set_availability(availability);
+                // A freshly read keymap invalidates a batch's paths. This arrives on Reload and
+                // when another program releases the keyboard, which is how a remap in Vial
+                // reaches the drills without restarting the app.
+                self.tutor.keyboard_changed();
                 if self.evdev_usb_dir.as_deref() != Some(info.usb_dir.as_path()) {
                     self.start_evdev(&info.usb_dir);
                 }
@@ -149,6 +168,7 @@ impl App {
                 self.connection = Connection::Waiting;
                 self.unlock = Unlock::Unknown;
                 self.state.clear_keyboard();
+                self.tutor.set_availability(Availability::NoKeyboard);
                 self.evdev = EvdevStatus::NotFound;
                 self.evdev_usb_dir = None;
             }
@@ -225,7 +245,83 @@ impl App {
     }
 
     fn start_unlock(&mut self) {
+        self.tutor.close();
         self.send(DeviceCommand::StartUnlock);
+    }
+
+    /// The failure reason is recorded inside the session, so the panel reads it from there
+    /// rather than this keeping a second copy that could drift.
+    fn start_drill(&mut self, id: drills::DrillId) {
+        let Some(keymap) = &self.state.keymap else { return };
+        let _ = self.tutor.start(id, keymap, self.state.host());
+    }
+
+    fn tutor_input(&mut self, input: tutor::Input, now: Instant) {
+        let Some(keymap) = &self.state.keymap else { return };
+        self.tutor.input(input, keymap, self.state.host(), now);
+    }
+
+    /// Whether to outline every key in its finger's colour. Independent of the tutor: the
+    /// colours are useful while just looking at the picture. They do depend on the keyboard
+    /// matching the hardwired finger map, though — on one that doesn't, they would name the
+    /// wrong fingers, so the same check that blocks the tutor withholds them.
+    fn finger_colours_shown(&self) -> bool {
+        self.finger_colours && matches!(self.tutor.available(), Availability::Ready)
+    }
+
+    /// Why the finger colours can't be drawn, for the disabled checkbox. Only a layout mismatch
+    /// counts: with no keyboard there is no picture to colour, and an unlock in progress doesn't
+    /// make the finger map wrong.
+    fn finger_colours_blocked(&self) -> Option<&str> {
+        match self.tutor.available() {
+            Availability::LayoutMismatch(why) => Some(why),
+            _ => None,
+        }
+    }
+
+    /// Why the tutor can't be opened right now, if it can't. An unlock needs two keys held for
+    /// ten seconds and can't be cancelled, so it must not overlap a drill — but this gates
+    /// opening only: an already-open tutor must always be closable.
+    fn tutor_blocked(&self) -> Option<String> {
+        self.tutor
+            .available()
+            .reason()
+            .or_else(|| matches!(self.unlock, Unlock::InProgress { .. }).then(|| "Finish the unlock first.".to_string()))
+    }
+
+    /// The only path by which a keystroke reaches `state` and, while the tutor is open, `tutor`.
+    /// Split out of `logic` so a test can drive it directly with synthetic input, without going
+    /// through egui's raw-input plumbing.
+    fn apply_focused(&mut self, inputs: Vec<FocusedInput>, now: Instant) {
+        for input in inputs {
+            match input {
+                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
+                FocusedInput::Key(_) => {} // evdev already reported it
+                FocusedInput::Text(text) => {
+                    self.state.on_text(&text);
+                    if self.tutor.is_active() {
+                        // Text can carry several characters at once (IME, dead keys). Space
+                        // arrives here too, which is why `status::visible` has to special-case it.
+                        for c in text.chars() {
+                            self.tutor_input(tutor::Input::Char(c), now);
+                        }
+                    }
+                }
+                FocusedInput::Command(key) if self.tutor.is_active() => {
+                    let input = match key {
+                        egui::Key::Backspace => tutor::Input::Backspace,
+                        egui::Key::Enter => tutor::Input::Enter,
+                        _ => tutor::Input::Escape,
+                    };
+                    self.tutor_input(input, now);
+                }
+                FocusedInput::Command(_) => {}
+                FocusedInput::FocusLost => {
+                    self.state.release_focused_keys();
+                    self.tutor_input(tutor::Input::FocusLost, now);
+                }
+            }
+        }
     }
 
     fn unlock_highlight(&self) -> &[(u8, u8)] {
@@ -234,7 +330,11 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
-            keyboard::show(ui, &self.state, now, self.unlock_highlight());
+            keyboard::show(ui, &self.state, now, keyboard::View {
+                unlock_keys: self.unlock_highlight(),
+                fingers: self.finger_colours_shown(),
+                hint: self.tutor.hint(),
+            });
             return;
         }
         if self.worker_stopped {
@@ -301,14 +401,8 @@ impl eframe::App for App {
     /// doc comment would otherwise pile up unseen.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
-        for input in focused::translate(&std::mem::take(&mut self.typed)) {
-            match input {
-                FocusedInput::Key(key) if !self.state.evdev_active => self.state.os_key(&key, now),
-                FocusedInput::Key(_) => {} // evdev already reported it
-                FocusedInput::Text(text) => self.state.on_text(&text),
-                FocusedInput::FocusLost => self.state.release_focused_keys(),
-            }
-        }
+        let inputs = focused::translate(&std::mem::take(&mut self.typed));
+        self.apply_focused(inputs, now);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -326,8 +420,16 @@ impl eframe::App for App {
         if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
             self.reload();
         }
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::T))
+            && (self.tutor.is_active() || self.tutor_blocked().is_none())
+        {
+            self.tutor.toggle();
+        }
 
         egui::Panel::bottom("status").show(ui, |ui| status::show(ui, self, now));
+        if self.tutor.is_active() {
+            egui::Panel::top("tutor").show(ui, |ui| tutor_panel::show(ui, self));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.central(ui, now));
         dialogs::show(ui.ctx(), self);
 
@@ -365,6 +467,25 @@ mod tests {
             vial_protocol: 6,
         };
         DeviceEvent::Connected { info, layout, keymap: Keymap::from_buffer(2, 2, 3, &buf).unwrap() }
+    }
+
+    /// `Connected` for the real Lily58: the layout the finger map actually accepts, and the
+    /// reference keymap `tutor::fixture` parses from a `--probe` dump. `connected()`'s 2x3
+    /// fixture is not a Lily58 by design (`the_tutor_follows_the_keyboard` checks exactly that),
+    /// so it can never bring the tutor to `Availability::Ready` — this is the one that can.
+    fn connected_lily58() -> DeviceEvent {
+        let layout =
+            Layout::from_definition(&serde_json::from_str(include_str!("../../tests/fixtures/lily58-definition.json")).unwrap())
+                .unwrap();
+        let keymap = tutor::fixture::reference_keymap();
+        let info = DeviceInfo {
+            dev_node: "/dev/hidraw98".into(),
+            usb_dir: "/nonexistent/usb-lily58".into(),
+            product: "Lily58".into(),
+            via_protocol: 12,
+            vial_protocol: 6,
+        };
+        DeviceEvent::Connected { info, layout, keymap }
     }
 
     #[test]
@@ -490,5 +611,126 @@ mod tests {
         drop(commands);
         app.start_unlock();
         assert_eq!(app.error.as_deref(), Some(DEVICE_WORKER_STOPPED));
+    }
+
+    /// The tutor is unavailable until the keyboard's layout has been checked against the finger
+    /// map, and goes away again when the keyboard does.
+    #[test]
+    fn the_tutor_follows_the_keyboard() {
+        let (mut app, _events, _commands) = app(None);
+        assert_eq!(app.tutor.available(), &crate::tutor::Availability::NoKeyboard);
+        app.on_device_event(connected(), Instant::now());
+        // The 2x3 test keyboard is not a Lily58, so the finger map rejects it by design.
+        assert!(matches!(app.tutor.available(), crate::tutor::Availability::LayoutMismatch(_)));
+        app.tutor.toggle();
+        assert!(!app.tutor.is_active(), "it can't be opened against a layout it doesn't know");
+        app.on_device_event(DeviceEvent::Disconnected, Instant::now());
+        assert_eq!(app.tutor.available(), &crate::tutor::Availability::NoKeyboard);
+    }
+
+    /// The predicate both Ctrl+T and the status-bar button gate *opening* the tutor on. An
+    /// unlock in progress can't be cancelled and must not overlap a drill, but before this it was
+    /// checked only by the button — Ctrl+T called `Session::toggle` unconditionally and opened
+    /// the tutor right past a running unlock.
+    /// The colours outline the picture whenever it's drawn — the tutor doesn't have to be open.
+    #[test]
+    fn finger_colours_show_without_the_tutor() {
+        let (mut app, _events, _commands) = app(None);
+        assert!(!app.finger_colours_shown(), "no keyboard, so no picture to colour");
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert!(!app.tutor.is_active(), "the tutor starts closed");
+        assert!(app.finger_colours_shown(), "and the colours show anyway");
+        app.finger_colours = false;
+        assert!(!app.finger_colours_shown(), "the checkbox still turns them off");
+    }
+
+    /// The colours come from a table keyed by matrix position, so on a keyboard that isn't this
+    /// one they would name the wrong fingers. The 2x3 test board is exactly that case.
+    #[test]
+    fn a_layout_that_isnt_a_lily58_gets_no_finger_colours() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected(), Instant::now());
+        assert!(app.finger_colours, "the preference is still on");
+        assert!(!app.finger_colours_shown(), "but the finger map doesn't describe this keyboard");
+        assert!(app.finger_colours_blocked().is_some(), "and the disabled checkbox says why");
+    }
+
+    #[test]
+    fn tutor_blocked_reports_an_unlock_in_progress() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert_eq!(app.tutor_blocked(), None, "nothing blocks it once the keyboard is ready");
+        app.on_device_event(DeviceEvent::Unlocking { counter: 10, unlock_keys: vec![] }, Instant::now());
+        assert!(app.tutor_blocked().is_some(), "an unlock in progress blocks opening");
+    }
+
+    /// Closes a deferred finding: no test before this one ever drove `App` to
+    /// `Availability::Ready`, because `connected()`'s 2x3 fixture always mismatches the finger
+    /// map. Only the real Lily58 layout gets there.
+    #[test]
+    fn the_real_keyboard_makes_the_tutor_ready() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert_eq!(app.tutor.available(), &Availability::Ready);
+    }
+
+    /// The mutation this guards against: deleting the tutor branch from `FocusedInput::Text` (or
+    /// only applying the first character of a multi-character `Text` event) leaves every other
+    /// test in the suite passing, because nothing else drives a keystroke through `apply_focused`
+    /// into `Session`.
+    #[test]
+    fn apply_focused_types_every_character_of_a_text_event_into_the_session() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle();
+        app.start_drill(0);
+        app.apply_focused(vec![FocusedInput::Text("as".into())], Instant::now());
+        let tutor::Phase::Typing { attempt, .. } = app.tutor.phase() else { panic!("still typing") };
+        assert_eq!(attempt.cursor(), 2, "both characters of the Text event must reach the attempt");
+    }
+
+    /// `FocusLost` must reach `Attempt::pause` through this same seam: feed a keystroke, lose
+    /// focus, then feed another keystroke after a long gap, and the gap must not be measured.
+    #[test]
+    fn apply_focused_focus_lost_pauses_the_tutor_clock() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle();
+        app.start_drill(0);
+        let t0 = Instant::now();
+        app.apply_focused(vec![FocusedInput::Text("a".into())], t0);
+        app.apply_focused(vec![FocusedInput::Text("s".into())], t0 + Duration::from_millis(100));
+        app.apply_focused(vec![FocusedInput::FocusLost], t0 + Duration::from_millis(100));
+        // A ten-minute gap across the focus loss must not be counted as typing time.
+        app.apply_focused(vec![FocusedInput::Text("d".into())], t0 + Duration::from_secs(600));
+        let tutor::Phase::Typing { attempt, .. } = app.tutor.phase() else { panic!("still typing") };
+        assert_eq!(attempt.cursor(), 3);
+        assert_eq!(attempt.elapsed(), Duration::from_millis(100), "the gap across FocusLost must not grow the clock");
+    }
+
+    /// While the tutor is `Off`, keystrokes must reach `state` only — never `Session`, and never
+    /// panic (e.g. by indexing into a batch that doesn't exist).
+    #[test]
+    fn apply_focused_does_not_reach_the_session_while_the_tutor_is_off() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        assert!(!app.tutor.is_active());
+        app.apply_focused(vec![FocusedInput::Text("as".into())], Instant::now());
+        assert!(!app.tutor.is_active(), "closed is closed: nothing here should open or drive it");
+    }
+
+    /// `Command(Enter)` and `Command(Escape)` are the tutor's own controls, routed through this
+    /// same seam: Enter starts the selected drill from the picker, Escape steps back out.
+    #[test]
+    fn apply_focused_commands_drive_the_tutor_state_machine() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.tutor.toggle(); // Off -> Choosing
+        app.tutor.select(0);
+        let now = Instant::now();
+        app.apply_focused(vec![FocusedInput::Command(egui::Key::Enter)], now);
+        assert_eq!(app.tutor.stage(), tutor::Stage::Typing, "Enter starts the selected drill");
+        app.apply_focused(vec![FocusedInput::Command(egui::Key::Escape)], now);
+        assert_eq!(app.tutor.stage(), tutor::Stage::Choosing, "Escape steps back out to Choosing");
     }
 }

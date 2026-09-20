@@ -17,9 +17,13 @@ most of this):
   interface (usage page `0xFF60`); `if02` carries mouse, joystick and
   extra-key event nodes. So there are four `/dev/input/event*` nodes, and only
   the `if00` one carries ordinary key presses.
-- The definition has 60 keys, not 58: the extra two are the encoder push
-  switches (`4,5` and `9,0`). Its four encoder-rotation entries (`e` in the
-  label) are skipped because they have no matrix position.
+- The definition has 60 keys, not 58. The extra two (`4,5` and `9,0`) are matrix positions the
+  firmware supports that a given build need not populate: the PCB takes rotary encoders there,
+  and the reference board has OLED screens instead. The keymap still assigns them something
+  (`KC_MPLY` and `KC_MUTE`), so they appear on the picture as ordinary keys. The typing tutor
+  gives them no finger, so they are the only keys the colours leave on the plain hairline.
+  Its four encoder-rotation entries (`e` in the label) are skipped because they have no matrix
+  position.
 - The left half's matrix columns run **from the inside out**: `0,0` is the "5"
   key and `0,5` is Esc. The right half is rows 5–9. Don't guess key positions
   from the usual Lily58 matrix; read them from the definition.
@@ -85,6 +89,92 @@ most of this):
   so the rest can't be sent as a second write. `EINTR` is retried.
 - `find_vial_device` passes on `read_dir` errors other than NotFound. The worker reports
   them once, which beats waiting silently.
+
+## The typing tutor
+
+- **The finger map is a hardwired table, not derived from geometry.** The first design clustered
+  keys by their coordinates. It doesn't work: the columnar stagger is up to 0.5 units and the row
+  pitch is 1.0, so row bands genuinely overlap across columns — the home row's `y` values sit
+  closer to the inner `[` key at 2.75 than to their own neighbours, and clustering on raw `y`
+  merges the home and bottom rows. Stagger-normalising first (`round(y - stagger(column))`) does
+  work, but a heuristic that misfires produces subtly wrong colours that are hard to notice,
+  where a table is wrong loudly or not at all. `fingers::validate` checks the table against the
+  reported layout in both directions.
+- **`hostlayout::usages_for` must return a list.** GB maps both `KC_BSLS` (0x31) and `KC_NUHS`
+  (0x32) to `#`, and the reference keymap has no `KC_BSLS` anywhere — `#` is `KC_NUHS` on layer 1.
+  A single-answer reverse lookup declares `#` untypeable and silently strips every heading from
+  the Markdown drill.
+- **Layer keys are searched on layer 0 only.** `MO(3)` exists only on layers 1 and 2, so a search
+  across every layer finds a key that does nothing from the base layer and produces an impossible
+  hint. Restricting the search to layer 0 makes hints correct by construction and treats anything
+  deeper as unreachable. Nothing is lost on this keymap: layer 3 is RGB controls and `KC_NO`.
+  This is also why there is no tri-layer branch in `hint.rs`.
+- **The hint prefers a thumb to a pinky, and that is a comfort judgement, not a cost one.** All
+  three of `{`'s routes cost one hold — Shift plus layer 0's `[`, layer 1's dedicated
+  `LSFT(KC_LBRC)` holding `MO(1)`, and layer 2's `[` plus Shift (two, in fact) — so hold-counting
+  cannot separate them. The rank tuple in `hint::resolve` therefore ranks a layer key above Shift,
+  then one-finger-per-hand above two-of-one-hand, before falling through to the lower layer for
+  determinism. On this board that moves 13 characters off Shift: `! " £ $ %` onto the home row
+  under the same finger, and `& ( ) * ^ _ { }` onto a left thumb plus a right-hand key.
+  Two things worth knowing about that ordering. **Pinky avoidance beats hand balance on purpose** —
+  `!` goes to LOWER + `a`, one-handed, rather than Shift + `1`, which uses both hands but stretches
+  the left pinky to the number row while the right holds Shift. And **the Shift drill no longer
+  teaches Shift for its symbols**; its capitals still do, because no layer here carries a shifted
+  letter. If that ever feels wrong, the fix is a drill-aware preference, not a change to the rank.
+- **Two hint rules need synthetic keymaps to test, because this board can't tell them apart.**
+  `+`'s cross-hand route is also its lower-layer route, so nothing here separates rule 3 from rule
+  4; and nothing here separates "reads the keymap" from "knows this keymap". So one test builds a
+  keymap whose cross-hand route is on the *higher* layer, and another moves `MO(1)` to the right
+  half and requires the hint to name the thumb it moved to. Checking a rule against the one board
+  that cannot exercise it is how a rule quietly becomes a coincidence.
+- **A batch is abandoned on any `DeviceEvent::Connected`, not just on Reload.** Both
+  `DeviceCommand::Reload` and resuming after another program releases the device set
+  `Session::loaded = false` and re-read the keymap, so a remap made in Vial arrives without a
+  Ctrl+R. Hanging abandonment off `App::reload` would leave a batch scoring against stale paths.
+- **`on_hover_text` shows nothing on a disabled widget.** The tutor button computes why it is
+  disabled (no keyboard, layout mismatch, unlock in progress) and must show that with
+  `Response::on_disabled_hover_text`. egui says so in its own doc comment (`response.rs:720`) and
+  gates the popup on `response.enabled()` (`tooltip.rs:53`), so the plain variant compiles, reads
+  naturally and silently does nothing. No test can catch it — nothing in a test suite observes a
+  tooltip.
+- **The bottom row makes almost no English words.** "Stretch down" draws on `z x c v m , . /`, and
+  the shipped word list yields six spellable words against 153 for "stretch up" and 296 for the
+  Shift drill. That is a property of the alphabet, not of this keymap, so the drill declares
+  `Style::Syllables` rather than leaning on the thin-pool fallback and apologising on every batch.
+  Recompute the pools before changing `words.txt` or a drill's groups.
+- **Matching a HID usage does not mean a key types the character.** `hint::resolve` picked
+  candidates by usage and then only asked the one question "does this character need Shift that the
+  keycode doesn't supply?", adding a Shift hold if so. The converse went unasked, so `LSFT(KC_EQL)`
+  was accepted as a route to `=`. This keymap puts the pre-shifted symbols on LOWER and their
+  unshifted twins on RAISE at the *same positions*, so the impostor sat one layer below the real
+  key and won the lower-layer tie-break: the hint said LOWER for a character only RAISE can type.
+  `=` and `+` resolved to byte-identical paths, which is impossible — one key plus one hold types
+  one character, and that equality is the cheapest way to spot this class of bug.
+  Still open, latent: `tap_basic` accepts `Action::Modded` for *any* modifier and `adds_shift`
+  reports only the Shift bit, so `LALT(KC_A)` would be offered as a route to `a`. Harmless on this
+  keymap — the only non-Shift modded codes are the `LALT` arrows on layer 2 row 5, which aren't
+  printable — but a keymap with `LALT(<letter>)` would need the guard widened to "no modifier
+  except a Shift the character requires".
+- **A per-item focus rule does not give you coverage.** "Keep an item if it uses at least one
+  focus character" is satisfied by one letter, so it says nothing about the rest of the set. Every
+  `Words` drill draws from a lowercase word list, so `Index reach` advertised `[ ] 5 6` in the
+  picker and could not type any of them — the letters `t g b y h n` satisfied the rule every time
+  — and `Shift combinations` advertised 24 digits and symbols while emitting only capitalised
+  words. `5` and `6` were asked for by nothing in the catalogue at all. The fix is cover items
+  (`generate::cover_item`); the guard is the test that every advertised **non-letter** turns up
+  over a run of batches. Non-letters specifically: an advertised letter can be rare without being
+  unreachable — `z` is in one word of the 296-word pool, and English frequency deciding how often
+  it comes up is correct, not a defect.
+- **The ten-colour palette has not been validated across themes.** The colours in
+  `ui::keyboard::finger_colour` are a starting point and need an eyeball check as thin strokes
+  against both the light and dark egui themes. They are on by default and no longer confined to
+  the tutor, so this is now the picture's ordinary appearance, not a mode's.
+- The finger colours are **not** a tutor setting. They live on `App` (`finger_colours`, with the
+  checkbox in the status bar) because they apply to the picture whenever it is drawn, and a
+  toggle inside the tutor panel would be unreachable with the tutor closed. What they do share
+  with the tutor is the layout check: `fingers::spot` is keyed by matrix position, so on a board
+  the finger map doesn't describe, the colours would name the wrong finger. `Availability` gates
+  both.
 
 ## Testing lesson
 
