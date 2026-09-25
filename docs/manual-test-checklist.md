@@ -45,6 +45,17 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Ctrl+R mid-batch returns to the drill picker.
 - [ ] Unplug the keyboard mid-batch: the panel closes and the button says why.
 
+## Compact when unfocused (run on GNOME and KDE)
+- [ ] The **Compact when unfocused** checkbox is off at startup.
+- [ ] With it on and keep-above set, clicking another window turns the assistant into keys plus labels, keys the same size, see-through between them.
+- [ ] Clicks between the keys and on them reach the window underneath.
+- [ ] Alt+Tab, the taskbar or the Overview brings back the full, opaque window at its previous size.
+- [ ] The labels update while typing in another window (all-windows or live-layers tier); the layer label shows `Layer ?` without live layers.
+- [ ] A drill in progress pauses and resumes on refocus.
+- [ ] Unplugging the keyboard while compact brings the full window back, showing "Waiting for Lily58…".
+- [ ] Maximized, the window doesn't go compact.
+- [ ] Several focus round trips in a row don't make the keys smaller.
+
 ## Robustness
 - [ ] Opening Vial while the assistant runs shows "paused: vial (…) has the keyboard open", and Vial works normally. Closing Vial makes the assistant reconnect.
 - [ ] Remapping a key in Vial, then closing Vial, shows the new label after the reconnect.
