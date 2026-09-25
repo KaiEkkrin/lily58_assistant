@@ -1,6 +1,7 @@
 //! The eframe application: connects the device worker and input sources to the screen.
 
 mod dialogs;
+mod compact;
 pub mod keyboard;
 mod status;
 mod tutor_panel;
