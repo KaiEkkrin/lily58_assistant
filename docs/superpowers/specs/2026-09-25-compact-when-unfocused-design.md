@@ -85,13 +85,17 @@ is visible.
 **Entering compact** (on the first frame the conditions hold):
 
 - freeze the key size (`unit`) recorded on the last full frame;
-- record the size to restore, `ctx.content_rect().size()`, read once here and
-  never while changing modes, since a resize lands a frame or two later;
-- send `Decorations(false)`, `MousePassthrough(true)`, `InnerSize(compact size)`.
+- restore to the content size recorded alongside that same `unit`, not to this
+  frame's own content size, since a resize lands a frame or two later and a
+  focus blip in between must not capture the still-compact size as the size to
+  restore;
+- send `MinInnerSize(ZERO)`, `Decorations(false)`, `MousePassthrough(true)`,
+  `InnerSize(compact size)`.
 
 **Leaving compact** (on the first frame they don't):
 
-- send `Decorations(true)`, `MousePassthrough(false)`, `InnerSize(restore size)`.
+- send `MinInnerSize(FULL_MIN_SIZE)`, `Decorations(true)`,
+  `MousePassthrough(false)`, `InnerSize(restore size)`.
 
 **Shown while compact:** the keys and the two labels, nothing else. The status
 bar, tutor panel, dialogs (`dialogs::show`) and error lines are not drawn; they
@@ -108,8 +112,8 @@ fine, since compact ends on refocus.
 them. It gains a sizing mode:
 
 - `Fit::Fill` — today's behaviour;
-- `Fit::Unit(f32)` — use this key size, anchored at the top-left of the space
-  with the compact margin.
+- `Fit::Fixed { unit, margin }` — use this key size, anchored `margin` points
+  from the top-left of the space.
 
 It returns the key size it used. Full mode records that every frame; entering
 compact freezes the last value.
@@ -156,11 +160,13 @@ tidily.
 
 - **`src/ui/compact.rs` (new).** Pure logic:
   - `should_be_compact(enabled, focused, has_layout, maximized, fullscreen) -> bool`
-  - `window_size(bounds, unit, label_row) -> Vec2`
-  - label placement: `label_slots(layout, unit, label_size) -> Slots`, which
-    reports the two rectangles and whether a label row is needed
+  - `window_size(layout, unit) -> Vec2`
+  - label placement: `label_slots(layout) -> Slots`, which reports the two
+    rectangles and whether a label row is needed
   - `enter_commands(size) -> Vec<ViewportCommand>` and
-    `leave_commands(size) -> Vec<ViewportCommand>`
+    `leave_commands(size) -> Vec<ViewportCommand>`, which also carry the
+    `MinInnerSize` change (`ZERO` entering, `FULL_MIN_SIZE` leaving) so the
+    compact size isn't clamped by the full window's minimum
   
   and the compact drawing: keys at the frozen size plus the labels.
 - **`src/ui/mod.rs`.** A `Compact` state on `App`: the checkbox flag, the key
@@ -181,7 +187,7 @@ Test-driven, in the existing `#[cfg(test)]` style; CI runs build, test and
 ### `compact.rs`
 
 - `should_be_compact` for each combination of the four conditions.
-- `window_size` from bounds and unit, with and without a label row.
+- `window_size` from a layout and a unit, with and without a label row.
 - On the captured Lily58 layout (`tests/fixtures/lily58-definition.json`): both
   label rectangles overlap no key, and no label row is needed.
 - On a small layout with no gap under the corners: a label row is needed.
@@ -202,7 +208,7 @@ split `apply_focused` from `logic`).
 
 ### `keyboard.rs`
 
-- `Fit::Unit` uses the given size; `Fit::Fill` returns the size it computed.
+- `Fit::Fixed` uses the given size; `Fit::Fill` returns the size it computed.
 
 ### Manual checklist additions
 

@@ -55,6 +55,8 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Unplugging the keyboard while compact brings the full window back, showing "Waiting for Lily58…".
 - [ ] Maximized, the window doesn't go compact.
 - [ ] Several focus round trips in a row don't make the keys smaller.
+- [ ] Compact is transparent on this PC's GPU/driver (not a black box).
+- [ ] Focus, click away and refocus in quick succession several times: the full window always returns at its previous size.
 
 ## Robustness
 - [ ] Opening Vial while the assistant runs shows "paused: vial (…) has the keyboard open", and Vial works normally. Closing Vial makes the assistant reconnect.
