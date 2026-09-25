@@ -57,6 +57,8 @@ pub struct App {
     /// Outline every key in its finger's colour. A picture preference, not a tutor one: it
     /// holds whether or not the tutor is open, so it lives here rather than on `Session`.
     finger_colours: bool,
+    /// Compact-when-unfocused: the checkbox, and while compact, the frozen key size.
+    compact: compact::Compact,
     tutor: Session,
     /// Everything typed into the window since the last `logic` call, copied in
     /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
@@ -79,7 +81,8 @@ pub fn run() -> eframe::Result {
             .with_title("Lily58 Assistant")
             .with_app_id("lily58-assistant")
             .with_inner_size([960.0, 460.0])
-            .with_min_inner_size([480.0, 240.0]),
+            .with_min_inner_size([480.0, 240.0])
+            .with_transparent(true),
         ..Default::default()
     };
     eframe::run_native("Lily58 Assistant", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -117,6 +120,7 @@ impl App {
             worker_stopped: false,
             show_hints: false,
             finger_colours: true,
+            compact: compact::Compact::default(),
             tutor: Session::new(),
             typed: Vec::new(),
             typed_seen: Vec::new(),
@@ -329,14 +333,22 @@ impl App {
         if matches!(self.unlock, Unlock::InProgress { .. }) { &self.unlock_keys } else { &[] }
     }
 
+    /// Split from `ui` so tests can drive the mode changes without a real window.
+    fn compact_frame(&mut self, facts: compact::WindowFacts) -> Vec<egui::ViewportCommand> {
+        self.compact.frame(facts, self.state.layout.as_ref())
+    }
+
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
-            let _ = keyboard::show(ui, &self.state, now, keyboard::View {
+            let unit = keyboard::show(ui, &self.state, now, keyboard::View {
                 unlock_keys: self.unlock_highlight(),
                 fingers: self.finger_colours_shown(),
                 hint: self.tutor.hint(),
                 translucent: false,
             }, keyboard::Fit::Fill);
+            if let Some(unit) = unit {
+                self.compact.record_full_unit(unit, ui.ctx().content_rect().size());
+            }
             return;
         }
         if self.worker_stopped {
@@ -407,6 +419,11 @@ impl eframe::App for App {
         self.apply_focused(inputs, now);
     }
 
+    /// Transparent so compact mode can show what's underneath; full mode's panels paint over it.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = Instant::now();
         self.drain_device_events(now);
@@ -426,6 +443,23 @@ impl eframe::App for App {
             && (self.tutor.is_active() || self.tutor_blocked().is_none())
         {
             self.tutor.toggle();
+        }
+
+        let ctx = ui.ctx().clone();
+        let content_size = ctx.content_rect().size();
+        let facts = ctx.input(|i| compact::WindowFacts {
+            focused: i.focused,
+            maximized: i.viewport().maximized == Some(true),
+            fullscreen: i.viewport().fullscreen == Some(true),
+            content_size,
+        });
+        for command in self.compact_frame(facts) {
+            ctx.send_viewport_cmd(command);
+        }
+        if let Some(unit) = self.compact.frozen_unit() {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| compact::show(ui, self, now, unit));
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
         }
 
         egui::Panel::bottom("status").show(ui, |ui| status::show(ui, self, now));
@@ -734,5 +768,48 @@ mod tests {
         assert_eq!(app.tutor.stage(), tutor::Stage::Typing, "Enter starts the selected drill");
         app.apply_focused(vec![FocusedInput::Command(egui::Key::Escape)], now);
         assert_eq!(app.tutor.stage(), tutor::Stage::Choosing, "Escape steps back out to Choosing");
+    }
+
+    fn unfocused() -> compact::WindowFacts {
+        compact::WindowFacts { focused: false, maximized: false, fullscreen: false, content_size: egui::Vec2::new(960.0, 460.0) }
+    }
+
+    #[test]
+    fn unplugging_while_compact_brings_the_full_window_back() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.compact.enabled = true;
+        app.compact.record_full_unit(40.0, egui::Vec2::new(960.0, 460.0));
+        assert!(!app.compact_frame(unfocused()).is_empty());
+        assert_eq!(app.compact.frozen_unit(), Some(40.0));
+
+        app.on_device_event(DeviceEvent::Disconnected, Instant::now());
+        assert_eq!(app.compact_frame(unfocused()), compact::leave_commands(egui::Vec2::new(960.0, 460.0)));
+        assert_eq!(app.compact.frozen_unit(), None);
+    }
+
+    #[test]
+    fn compact_is_off_at_startup() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.compact.record_full_unit(40.0, egui::Vec2::new(960.0, 460.0));
+        assert!(!app.compact.enabled);
+        assert!(app.compact_frame(unfocused()).is_empty());
+    }
+
+    #[test]
+    fn a_full_frame_records_the_key_size_for_compact_mode() {
+        let (mut app, _events, _commands) = app(None);
+        app.on_device_event(connected_lily58(), Instant::now());
+        app.compact.enabled = true;
+        let ctx = app.ctx.clone();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 460.0))),
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |ui| app.central(ui, Instant::now())).textures_delta.clear();
+        let commands = app.compact_frame(unfocused());
+        assert_eq!(commands.first(), Some(&egui::ViewportCommand::Decorations(false)));
+        assert!(app.compact.frozen_unit().is_some_and(|u| u > 8.0));
     }
 }

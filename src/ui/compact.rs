@@ -5,11 +5,14 @@
 //! minimized window, and a new window would inherit neither the user's keep-above setting nor its
 //! position. The app can't move its window on Wayland either, so the keys shift a little on each
 //! change (the title bar goes, and the keys go from centred to top-left anchored).
-#![allow(dead_code)] // wired up in the next task
 
-use eframe::egui::{Rect, Vec2, ViewportCommand, pos2};
+use std::time::Instant;
 
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Vec2, ViewportCommand, pos2};
+
+use super::{App, keyboard, status};
 use crate::layout::Layout;
+use crate::state::AppState;
 
 /// Space around the keys in compact mode, so their outlines aren't clipped. Points.
 pub const MARGIN: f32 = 8.0;
@@ -128,6 +131,51 @@ impl Compact {
 
     pub fn frozen_unit(&self) -> Option<f32> {
         self.frozen.map(|f| f.unit)
+    }
+}
+
+/// Background behind each label, so it reads over whatever is underneath.
+const LABEL_BG: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 215);
+
+pub fn layer_text(state: &AppState, now: Instant) -> String {
+    if state.matrix_active { format!("Layer {}", state.active_layer(now)) } else { "Layer ?".into() }
+}
+
+/// Draws the compact view: keys at the frozen size, and the last-key and layer labels.
+pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
+    let Some(layout) = &app.state.layout else { return };
+    let top_left = ui.max_rect().min + Vec2::splat(MARGIN);
+    let _ = keyboard::show(ui, &app.state, now, keyboard::View {
+        unlock_keys: app.unlock_highlight(),
+        fingers: app.finger_colours_shown(),
+        hint: app.tutor.hint(),
+        translucent: true,
+    }, keyboard::Fit::Fixed { unit, margin: MARGIN });
+
+    let (min_x, min_y, ..) = layout.bounds();
+    let to_screen = |p: Pos2| top_left + Vec2::new((p.x - min_x) * unit, (p.y - min_y) * unit);
+    let slots = label_slots(layout);
+    let last = app.state.last.as_ref().map(status::last_key_text).unwrap_or_default();
+    let painter = ui.painter();
+    for (slot, text, align) in [(slots.left, last, Align2::LEFT_CENTER), (slots.right, layer_text(&app.state, now), Align2::RIGHT_CENTER)] {
+        if text.is_empty() {
+            continue;
+        }
+        let rect = Rect::from_min_max(to_screen(slot.min), to_screen(slot.max));
+        // The key labels' size, shrunk if the text is too wide for the box.
+        let size = (unit * 0.3).clamp(9.0, 20.0);
+        let galley = painter.layout_no_wrap(text.clone(), FontId::monospace(size), Color32::WHITE);
+        let pad = 6.0;
+        let fit = ((rect.width() - 2.0 * pad) / galley.size().x).min(1.0);
+        let galley = painter.layout_no_wrap(text, FontId::monospace(size * fit), Color32::WHITE);
+        let bg_w = galley.size().x + 2.0 * pad;
+        let bg = if align == Align2::LEFT_CENTER {
+            Rect::from_min_max(rect.min, pos2(rect.min.x + bg_w, rect.max.y))
+        } else {
+            Rect::from_min_max(pos2(rect.max.x - bg_w, rect.min.y), rect.max)
+        };
+        painter.rect_filled(bg, CornerRadius::same(4), LABEL_BG);
+        painter.galley(pos2(bg.min.x + pad, bg.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
     }
 }
 
@@ -273,5 +321,17 @@ mod tests {
         c.record_full_unit(38.5, compact);
         c.frame(facts(false), Some(&layout));
         assert_eq!(c.frozen_unit(), Some(40.0), "the key size didn't drift");
+    }
+
+    #[test]
+    fn layer_label_says_when_the_layer_is_unknown() {
+        use crate::hostlayout::HostLayout;
+        use crate::layers::TriLayer;
+        use crate::state::AppState;
+        use std::time::Instant;
+        let mut state = AppState::new(HostLayout::Gb, TriLayer::default(), false);
+        assert_eq!(layer_text(&state, Instant::now()), "Layer ?");
+        state.set_matrix_active(true);
+        assert_eq!(layer_text(&state, Instant::now()), "Layer 0");
     }
 }
