@@ -24,6 +24,8 @@ const FINGER_STROKE: f32 = 2.0;
 const TRANSLUCENT_ALPHA: f32 = 0.9;
 /// Space `Fit::Fill` leaves around the keys, in total per axis. Points.
 const FILL_PADDING: f32 = 24.0;
+/// Segments per rounded key corner.
+const ARC_STEPS: usize = 4;
 
 /// How big to draw the keys.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -148,7 +150,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>, f
             None => Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
         };
         let inner = KeyGeom { x: key.x + GAP, y: key.y + GAP, w: key.w - 2.0 * GAP, h: key.h - 2.0 * GAP, ..key.clone() };
-        let points: Vec<Pos2> = inner.corners().into_iter().map(to_screen).collect();
+        let points = rounded(inner.corners().map(to_screen), corner_radius(unit));
         painter.add(Shape::convex_polygon(points, fill, stroke));
 
         let cap = keycap(code, state.host());
@@ -168,6 +170,32 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>, f
         }
     }
     Some(unit)
+}
+
+/// How round a key's corners are, in points, for keys `unit` points wide. Slightly round, not
+/// a pill. Also used for the compact labels, so they match the keys.
+pub fn corner_radius(unit: f32) -> f32 {
+    (unit * 0.08).clamp(2.0, 8.0)
+}
+
+/// A convex quad's outline with each corner replaced by a curve `radius` points in from it along
+/// both edges (capped at half the shorter edge). A curve rather than a circular arc so it also
+/// suits rotated and non-rectangular keys; it stays inside the quad, so the result is convex.
+fn rounded(corners: [Pos2; 4], radius: f32) -> Vec<Pos2> {
+    let mut points = Vec::with_capacity(4 * (ARC_STEPS + 1));
+    for i in 0..4 {
+        let (prev, c, next) = (corners[(i + 3) % 4], corners[i], corners[(i + 1) % 4]);
+        let r = radius.min(c.distance(prev) / 2.0).min(c.distance(next) / 2.0);
+        let towards = |p: Pos2| c + (p - c).normalized() * r;
+        let (a, b) = (towards(prev), towards(next));
+        // Quadratic Bézier from `a` to `b` with the corner as its control point.
+        points.extend((0..=ARC_STEPS).map(|s| {
+            let t = s as f32 / ARC_STEPS as f32;
+            let u = 1.0 - t;
+            Pos2::new(u * u * a.x + 2.0 * u * t * c.x + t * t * b.x, u * u * a.y + 2.0 * u * t * c.y + t * t * b.y)
+        }));
+    }
+    points
 }
 
 #[cfg(test)]
@@ -211,6 +239,40 @@ mod tests {
                 assert_ne!(a, b, "two fingers share a colour");
             }
         }
+    }
+
+    fn quad(w: f32, h: f32) -> [Pos2; 4] {
+        [Pos2::new(0.0, 0.0), Pos2::new(w, 0.0), Pos2::new(w, h), Pos2::new(0.0, h)]
+    }
+
+    #[test]
+    fn rounded_keys_lose_their_sharp_corners_but_stay_inside_the_key() {
+        let corners = quad(40.0, 30.0);
+        let points = rounded(corners, 4.0);
+        assert_eq!(points.len(), 4 * (ARC_STEPS + 1));
+        for p in &points {
+            assert!((0.0..=40.0).contains(&p.x) && (0.0..=30.0).contains(&p.y), "{p:?} outside the key");
+        }
+        for c in corners {
+            assert!(points.iter().all(|p| p.distance(c) > 1.0), "corner {c:?} is still sharp");
+        }
+        // Each curve starts and ends 4 points in from its corner, along the edges.
+        assert_eq!(points[0], Pos2::new(0.0, 4.0));
+        assert_eq!(points[ARC_STEPS], Pos2::new(4.0, 0.0));
+    }
+
+    #[test]
+    fn a_radius_too_big_for_the_key_is_capped_at_half_the_shorter_edge() {
+        let points = rounded(quad(40.0, 10.0), 100.0);
+        assert_eq!(points[0], Pos2::new(0.0, 5.0));
+        assert_eq!(points[ARC_STEPS], Pos2::new(5.0, 0.0));
+    }
+
+    #[test]
+    fn corners_are_slightly_round_at_any_key_size() {
+        assert_eq!(corner_radius(10.0), 2.0);
+        assert!((corner_radius(55.0) - 4.4).abs() < 1e-4);
+        assert_eq!(corner_radius(200.0), 8.0);
     }
 
     #[test]
