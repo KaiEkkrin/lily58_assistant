@@ -20,6 +20,19 @@ const HINT_HOLD: Color32 = Color32::from_rgb(170, 215, 170);
 const GAP: f32 = 0.05;
 /// Thicker than the plain hairline, so a finger group reads as a group.
 const FINGER_STROKE: f32 = 2.0;
+/// Key fill alpha in compact mode, so what's underneath shows faintly through.
+const TRANSLUCENT_ALPHA: f32 = 0.9;
+/// Space `Fit::Fill` leaves around the keys, in total per axis. Points.
+const FILL_PADDING: f32 = 24.0;
+
+/// How big to draw the keys.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fit {
+    /// As large as fits, centred.
+    Fill,
+    /// This key size in points, anchored `margin` points from the top-left.
+    Fixed { unit: f32, margin: f32 },
+}
 
 /// What to highlight on the picture besides the keys being pressed.
 #[derive(Default)]
@@ -28,6 +41,8 @@ pub struct View<'a> {
     /// Outline each key in its finger's colour.
     pub fingers: bool,
     pub hint: Option<&'a KeyPath>,
+    /// Draw key fills slightly see-through (compact mode).
+    pub translucent: bool,
 }
 
 /// Ten colours: four fingers and a thumb on each hand. A mirrored five would be easier on the
@@ -78,8 +93,9 @@ pub fn keycap(code: u16, host: HostLayout) -> Keycap {
     plain(keycodes::label(code).replace("KC_", ""))
 }
 
-pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>) {
-    let (Some(layout), Some(keymap)) = (&state.layout, &state.keymap) else { return };
+/// Draws the keyboard and returns the key size used, in points.
+pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>, fit: Fit) -> Option<f32> {
+    let (Some(layout), Some(keymap)) = (&state.layout, &state.keymap) else { return None };
     let mask = state.layer_mask(now);
     let active = state.active_layer(now);
     let held = state.held_positions();
@@ -87,9 +103,14 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>) {
     let (min_x, min_y, max_x, max_y) = layout.bounds();
     let (span_x, span_y) = ((max_x - min_x).max(1.0), (max_y - min_y).max(1.0));
     let avail = ui.available_size();
-    let unit = ((avail.x - 24.0) / span_x).min((avail.y - 24.0) / span_y).max(8.0);
     let (response, painter) = ui.allocate_painter(avail, Sense::hover());
-    let origin = response.rect.center() - Vec2::new(span_x, span_y) * unit / 2.0;
+    let (unit, origin) = match fit {
+        Fit::Fill => {
+            let unit = ((avail.x - FILL_PADDING) / span_x).min((avail.y - FILL_PADDING) / span_y).max(8.0);
+            (unit, response.rect.center() - Vec2::new(span_x, span_y) * unit / 2.0)
+        }
+        Fit::Fixed { unit, margin } => (unit, response.rect.min + Vec2::splat(margin)),
+    };
     let to_screen = |(x, y): (f32, f32)| Pos2::new(origin.x + (x - min_x) * unit, origin.y + (y - min_y) * unit);
     let visuals = ui.visuals().clone();
     let hint_key = view.hint.map(|h| h.key);
@@ -114,6 +135,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>) {
         } else {
             visuals.widgets.inactive.bg_fill
         };
+        let fill = if view.translucent { fill.gamma_multiply(TRANSLUCENT_ALPHA) } else { fill };
         let text_color = if is_held || is_unlock || is_hint || is_hold {
             Color32::BLACK
         } else if layer < active {
@@ -145,6 +167,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>) {
             }
         }
     }
+    Some(unit)
 }
 
 #[cfg(test)]
@@ -196,5 +219,55 @@ mod tests {
         assert!(view.unlock_keys.is_empty());
         assert!(!view.fingers);
         assert!(view.hint.is_none());
+        assert!(!view.translucent);
+    }
+
+    fn lily58_state() -> AppState {
+        use crate::layers::TriLayer;
+        use crate::layout::Layout;
+        let layout =
+            Layout::from_definition(&serde_json::from_str(include_str!("../../tests/fixtures/lily58-definition.json")).unwrap())
+                .unwrap();
+        let mut state = AppState::new(HostLayout::Gb, TriLayer::default(), false);
+        state.set_keyboard(layout, crate::tutor::fixture::reference_keymap());
+        state
+    }
+
+    /// Runs one frame on a 960×460 screen and returns what `show` reported and the space it had.
+    fn run(state: &AppState, fit: Fit) -> (Option<f32>, Vec2) {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 460.0))),
+            ..Default::default()
+        };
+        let (mut unit, mut avail) = (None, Vec2::ZERO);
+        ctx.run_ui(raw, |ui| {
+            avail = ui.available_size();
+            unit = show(ui, state, Instant::now(), View::default(), fit);
+        })
+        .textures_delta
+        .clear();
+        (unit, avail)
+    }
+
+    #[test]
+    fn fill_reports_the_key_size_it_chose() {
+        let (unit, avail) = run(&lily58_state(), Fit::Fill);
+        // Lily58 spans 16.5 × 5.75 key units; Fill leaves 24pt around the keys.
+        let expected = ((avail.x - 24.0) / 16.5).min((avail.y - 24.0) / 5.75).max(8.0);
+        let unit = unit.expect("a keyboard is loaded");
+        assert!((unit - expected).abs() < 1e-3, "{unit} vs {expected}");
+    }
+
+    #[test]
+    fn fixed_uses_the_key_size_it_is_given() {
+        let (unit, _) = run(&lily58_state(), Fit::Fixed { unit: 37.0, margin: 8.0 });
+        assert_eq!(unit, Some(37.0));
+    }
+
+    #[test]
+    fn no_keyboard_no_key_size() {
+        let state = AppState::new(HostLayout::Gb, crate::layers::TriLayer::default(), false);
+        assert_eq!(run(&state, Fit::Fill).0, None);
     }
 }

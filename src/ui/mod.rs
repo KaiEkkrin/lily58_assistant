@@ -331,11 +331,12 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
         if self.state.layout.is_some() {
-            keyboard::show(ui, &self.state, now, keyboard::View {
+            let _ = keyboard::show(ui, &self.state, now, keyboard::View {
                 unlock_keys: self.unlock_highlight(),
                 fingers: self.finger_colours_shown(),
                 hint: self.tutor.hint(),
-            });
+                translucent: false,
+            }, keyboard::Fit::Fill);
             return;
         }
         if self.worker_stopped {
