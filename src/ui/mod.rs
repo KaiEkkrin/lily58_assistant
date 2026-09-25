@@ -334,8 +334,8 @@ impl App {
     }
 
     /// Split from `ui` so tests can drive the mode changes without a real window.
-    fn compact_frame(&mut self, facts: compact::WindowFacts) -> Vec<egui::ViewportCommand> {
-        self.compact.frame(facts, self.state.layout.as_ref())
+    fn compact_frame(&mut self, facts: compact::WindowFacts, now: Instant) -> Vec<egui::ViewportCommand> {
+        self.compact.frame(facts, self.state.layout.as_ref(), now)
     }
 
     fn central(&mut self, ui: &mut egui::Ui, now: Instant) {
@@ -453,8 +453,11 @@ impl eframe::App for App {
             fullscreen: i.viewport().fullscreen == Some(true),
             content_size,
         });
-        for command in self.compact_frame(facts) {
+        for command in self.compact_frame(facts, now) {
             ctx.send_viewport_cmd(command);
+        }
+        if let Some(wait) = self.compact.wake_in(now) {
+            ctx.request_repaint_after(wait);
         }
         if let Some(unit) = self.compact.frozen_unit() {
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| compact::show(ui, self, now, unit));
@@ -780,11 +783,13 @@ mod tests {
         app.on_device_event(connected_lily58(), Instant::now());
         app.compact.enabled = true;
         app.compact.record_full_unit(40.0, egui::Vec2::new(960.0, 460.0));
-        assert!(!app.compact_frame(unfocused()).is_empty());
+        let t = Instant::now();
+        app.compact_frame(unfocused(), t);
+        assert!(!app.compact_frame(unfocused(), t + compact::GRACE).is_empty());
         assert_eq!(app.compact.frozen_unit(), Some(40.0));
 
         app.on_device_event(DeviceEvent::Disconnected, Instant::now());
-        assert_eq!(app.compact_frame(unfocused()), compact::leave_commands(egui::Vec2::new(960.0, 460.0)));
+        assert_eq!(app.compact_frame(unfocused(), t + compact::GRACE), compact::leave_commands(egui::Vec2::new(960.0, 460.0)));
         assert_eq!(app.compact.frozen_unit(), None);
     }
 
@@ -794,7 +799,9 @@ mod tests {
         app.on_device_event(connected_lily58(), Instant::now());
         app.compact.record_full_unit(40.0, egui::Vec2::new(960.0, 460.0));
         assert!(!app.compact.enabled);
-        assert!(app.compact_frame(unfocused()).is_empty());
+        let t = Instant::now();
+        app.compact_frame(unfocused(), t);
+        assert!(app.compact_frame(unfocused(), t + compact::GRACE).is_empty());
     }
 
     #[test]
@@ -808,7 +815,9 @@ mod tests {
             ..Default::default()
         };
         ctx.run_ui(raw, |ui| app.central(ui, Instant::now())).textures_delta.clear();
-        let commands = app.compact_frame(unfocused());
+        let t = Instant::now();
+        app.compact_frame(unfocused(), t);
+        let commands = app.compact_frame(unfocused(), t + compact::GRACE);
         assert!(commands.contains(&egui::ViewportCommand::Decorations(false)));
         assert!(app.compact.frozen_unit().is_some_and(|u| u > 8.0));
     }
