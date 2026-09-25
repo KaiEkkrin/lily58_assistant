@@ -5,14 +5,19 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, RichText};
 
 use super::{App, Connection};
-use crate::state::Tier;
+use crate::state::{LastKey, Tier};
+
+/// The last key as the status bar shows it, e.g. `KC_QUOT  →  '`.
+pub(super) fn last_key_text(last: &LastKey) -> String {
+    let typed = last.text.as_deref().map(|t| format!("  →  {}", visible(t))).unwrap_or_default();
+    format!("{}{typed}", last.label)
+}
 
 pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
     ui.horizontal_wrapped(|ui| {
         match &app.state.last {
             Some(last) => {
-                let typed = last.text.as_deref().map(|t| format!("  →  {}", visible(t))).unwrap_or_default();
-                ui.label(RichText::new(format!("{}{typed}", last.label)).monospace().strong());
+                ui.label(RichText::new(last_key_text(last)).monospace().strong());
                 if last.inferred && last.layer != 0 {
                     ui.label(format!("(probably layer {})", last.layer));
                 }
@@ -63,6 +68,10 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
         if let Some(why) = colours_blocked {
             colours.on_disabled_hover_text(why);
         }
+        ui.checkbox(&mut app.compact.enabled, "Compact when unfocused").on_hover_text(
+            "When this window loses focus, shrink it to just the keys, see-through and click-through. \
+             Switch back with Alt+Tab, the taskbar or the Overview.",
+        );
         ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
             app.reload();
