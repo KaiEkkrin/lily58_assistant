@@ -197,7 +197,7 @@ pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
         } else {
             Rect::from_min_max(pos2(rect.max.x - bg_w, rect.min.y), rect.max)
         };
-        painter.rect_filled(bg, CornerRadius::same(4), LABEL_BG);
+        painter.rect_filled(bg, CornerRadius::same(keyboard::corner_radius(unit).round() as u8), LABEL_BG);
         painter.galley(pos2(bg.min.x + pad, bg.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
     }
 }
