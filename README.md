@@ -108,7 +108,7 @@ The assistant doesn't do this itself, because Wayland offers no portable way. Us
 - **KDE Plasma:** Alt+F3 → More Actions → Keep Above Others
 - **GNOME:** Alt+Space → Always on Top
 
-To cover less of what's underneath, tick **Compact when unfocused** in the status bar. When you click another window, the assistant shrinks to just the keys (at the same size), with the last key and layer beneath them, on a see-through background that lets clicks through to the window below. It comes back in full when focused again. Because clicks pass through it, switch back with the keyboard or desktop: Alt+Tab, the taskbar, or the Overview. The setting isn't saved. It has no effect while the window is maximized or fullscreen.
+To cover less of what's underneath, tick **Compact when unfocused** in the status bar. When you click another window, after about a second the assistant shrinks to just the keys (at the same size), with the last key and layer beneath them, on a see-through background that lets clicks through to the window below. It comes back in full when focused again. Because clicks pass through it, switch back with the keyboard or desktop: Alt+Tab, the taskbar, or the Overview. The setting isn't saved. It has no effect while the window is maximized or fullscreen.
 
 ## Known limits
 

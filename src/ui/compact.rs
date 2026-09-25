@@ -6,7 +6,7 @@
 //! position. The app can't move its window on Wayland either, so the keys shift a little on each
 //! change (the title bar goes, and the keys go from centred to top-left anchored).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Vec2, ViewportCommand, pos2};
 
@@ -25,6 +25,11 @@ const LABEL_W: f32 = 2.4;
 const LABEL_H: f32 = 0.6;
 /// Height of the extra row the labels move to when a layout has no gap under its corners.
 const LABEL_ROW: f32 = 0.8;
+/// How long the window must stay unfocused, at one size, before it goes compact. On GNOME
+/// Wayland, dragging a client-drawn border to resize takes keyboard focus for the drag; going
+/// compact then would drop the border and the drag with it. The size changing restarts the wait,
+/// and focus comes back when the drag ends.
+pub const GRACE: Duration = Duration::from_secs(1);
 
 /// What the window looks like this frame, gathered from egui by the caller.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,17 +121,32 @@ pub struct Compact {
     compact_size: Option<Vec2>,
     /// Set exactly while compact.
     frozen: Option<Frozen>,
+    /// While compact is wanted but waiting out `GRACE`: when the wait started, and the content
+    /// size then.
+    waiting: Option<(Instant, Vec2)>,
 }
 
 impl Compact {
     /// Decides this frame's mode and returns the commands for a change, if any. The size to
     /// restore comes from the last `record_full_unit` call, read here, never from a resize that
-    /// may still be in flight.
-    pub fn frame(&mut self, facts: WindowFacts, layout: Option<&Layout>) -> Vec<ViewportCommand> {
+    /// may still be in flight. Entering waits out `GRACE`; leaving is immediate.
+    pub fn frame(&mut self, facts: WindowFacts, layout: Option<&Layout>, now: Instant) -> Vec<ViewportCommand> {
         let want = should_be_compact(self.enabled, facts.focused, layout.is_some(), facts.maximized, facts.fullscreen);
         if layout.is_none() {
             // A replug must not enter compact with a stale size from before the keyboard left.
             self.full = None;
+        }
+        if !want || self.frozen.is_some() {
+            self.waiting = None;
+        } else {
+            let start = match self.waiting {
+                Some((start, size)) if (size - facts.content_size).length() < 1.0 => start,
+                _ => now, // just lost focus, or still being resized
+            };
+            self.waiting = Some((start, facts.content_size));
+            if now.duration_since(start) < GRACE {
+                return Vec::new();
+            }
         }
         match (self.frozen, want, layout, self.full) {
             (None, true, Some(layout), Some((unit, full_size))) => {
@@ -150,6 +170,11 @@ impl Compact {
         if !still_small {
             self.full = Some((unit, content_size));
         }
+    }
+
+    /// While waiting to go compact, how long until `frame` should be called again.
+    pub fn wake_in(&self, now: Instant) -> Option<Duration> {
+        self.waiting.map(|(start, _)| GRACE.saturating_sub(now.duration_since(start)))
     }
 
     pub fn frozen_unit(&self) -> Option<f32> {
@@ -297,54 +322,117 @@ mod tests {
         ]);
     }
 
+    /// Calls `frame` at `t` and again once `GRACE` has passed, returning the second's commands:
+    /// staying unfocused long enough to go compact.
+    fn settle(c: &mut Compact, facts: WindowFacts, layout: Option<&Layout>, t: Instant) -> Vec<ViewportCommand> {
+        c.frame(facts, layout, t);
+        c.frame(facts, layout, t + GRACE)
+    }
+
     #[test]
     fn losing_focus_freezes_the_key_size_and_regaining_it_restores_the_window() {
         let layout = lily58();
+        let t = Instant::now();
         let mut c = Compact { enabled: true, ..Default::default() };
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
-        assert_eq!(c.frame(facts(true), Some(&layout)), vec![]);
+        assert_eq!(c.frame(facts(true), Some(&layout), t), vec![]);
         assert_eq!(c.frozen_unit(), None);
 
-        assert_eq!(c.frame(facts(false), Some(&layout)), enter_commands(window_size(&layout, 40.0)));
+        assert_eq!(settle(&mut c, facts(false), Some(&layout), t), enter_commands(window_size(&layout, 40.0)));
         assert_eq!(c.frozen_unit(), Some(40.0));
-        assert_eq!(c.frame(facts(false), Some(&layout)), vec![], "no repeat while staying compact");
+        assert_eq!(c.frame(facts(false), Some(&layout), t + 2 * GRACE), vec![], "no repeat while staying compact");
+        assert_eq!(c.wake_in(t + 2 * GRACE), None, "nothing to wait for while compact");
 
-        assert_eq!(c.frame(facts(true), Some(&layout)), leave_commands(Vec2::new(960.0, 460.0)));
+        assert_eq!(c.frame(facts(true), Some(&layout), t + 2 * GRACE), leave_commands(Vec2::new(960.0, 460.0)));
         assert_eq!(c.frozen_unit(), None);
+    }
+
+    #[test]
+    fn compact_waits_out_the_grace_period() {
+        let layout = lily58();
+        let t = Instant::now();
+        let mut c = Compact { enabled: true, ..Default::default() };
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+
+        assert_eq!(c.frame(facts(false), Some(&layout), t), vec![]);
+        assert_eq!(c.wake_in(t), Some(GRACE));
+        let almost = t + GRACE - Duration::from_millis(1);
+        assert_eq!(c.frame(facts(false), Some(&layout), almost), vec![]);
+        assert_eq!(c.wake_in(almost), Some(Duration::from_millis(1)));
+        assert_eq!(c.frame(facts(false), Some(&layout), t + GRACE), enter_commands(window_size(&layout, 40.0)));
+    }
+
+    #[test]
+    fn focus_back_within_the_grace_period_never_goes_compact() {
+        let layout = lily58();
+        let t = Instant::now();
+        let mut c = Compact { enabled: true, ..Default::default() };
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+
+        c.frame(facts(false), Some(&layout), t);
+        assert_eq!(c.frame(facts(true), Some(&layout), t + GRACE / 2), vec![]);
+        assert_eq!(c.wake_in(t + GRACE / 2), None);
+        // Lost again: the wait starts over rather than carrying on from the first loss.
+        assert_eq!(c.frame(facts(false), Some(&layout), t + GRACE), vec![]);
+        assert_eq!(c.frame(facts(false), Some(&layout), t + GRACE + GRACE / 2), vec![]);
+        assert_eq!(c.frozen_unit(), None);
+    }
+
+    /// GNOME Wayland: dragging the window's border takes focus for the drag. The window must
+    /// stay full while the size keeps changing, or the border (and the drag) would vanish.
+    #[test]
+    fn resizing_while_unfocused_keeps_restarting_the_wait() {
+        let layout = lily58();
+        let t = Instant::now();
+        let mut c = Compact { enabled: true, ..Default::default() };
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+
+        let sized = |w: f32| WindowFacts { content_size: Vec2::new(w, 460.0), ..facts(false) };
+        let step = GRACE / 2;
+        for i in 0..6u32 {
+            assert_eq!(c.frame(sized(960.0 + 10.0 * i as f32), Some(&layout), t + step * i), vec![], "drag step {i}");
+        }
+        assert_eq!(c.frozen_unit(), None);
+        // The drag ends and focus comes back.
+        assert_eq!(c.frame(WindowFacts { focused: true, ..sized(1010.0) }, Some(&layout), t + step * 6), vec![]);
     }
 
     #[test]
     fn losing_the_keyboard_while_compact_restores_the_window() {
         let layout = lily58();
+        let t = Instant::now();
         let mut c = Compact { enabled: true, ..Default::default() };
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
-        c.frame(facts(false), Some(&layout));
-        assert_eq!(c.frame(facts(false), None), leave_commands(Vec2::new(960.0, 460.0)));
+        settle(&mut c, facts(false), Some(&layout), t);
+        assert_eq!(c.frame(facts(false), None, t + GRACE), leave_commands(Vec2::new(960.0, 460.0)));
         assert_eq!(c.frozen_unit(), None);
     }
 
     #[test]
     fn nothing_happens_with_the_checkbox_off_or_before_a_key_size_is_known() {
         let layout = lily58();
+        let t = Instant::now();
         let mut off = Compact::default();
         off.record_full_unit(40.0, Vec2::new(960.0, 460.0));
-        assert_eq!(off.frame(facts(false), Some(&layout)), vec![]);
+        assert_eq!(settle(&mut off, facts(false), Some(&layout), t), vec![]);
+        assert_eq!(off.wake_in(t), None, "no repaints asked for with the checkbox off");
 
         let mut unknown = Compact { enabled: true, ..Default::default() };
-        assert_eq!(unknown.frame(facts(false), Some(&layout)), vec![], "no full frame drawn yet");
+        assert_eq!(settle(&mut unknown, facts(false), Some(&layout), t), vec![], "no full frame drawn yet");
     }
 
     #[test]
     fn full_frames_still_at_the_compact_size_are_not_recorded() {
         let layout = lily58();
+        let t = Instant::now();
         let mut c = Compact { enabled: true, ..Default::default() };
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
         let compact = window_size(&layout, 40.0);
-        c.frame(facts(false), Some(&layout));
-        c.frame(facts(true), Some(&layout));
+        settle(&mut c, facts(false), Some(&layout), t);
+        c.frame(facts(true), Some(&layout), t + GRACE);
         // The resize back hasn't landed: keys fitted into the small window come out smaller.
         c.record_full_unit(38.5, compact);
-        c.frame(facts(false), Some(&layout));
+        settle(&mut c, facts(false), Some(&layout), t + GRACE);
         assert_eq!(c.frozen_unit(), Some(40.0), "the key size didn't drift");
     }
 
@@ -355,24 +443,25 @@ mod tests {
     #[test]
     fn restore_size_survives_a_focus_blip_before_the_resize_lands() {
         let layout = lily58();
+        let t = Instant::now();
         let mut c = Compact { enabled: true, ..Default::default() };
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
         let compact = window_size(&layout, 40.0);
 
-        assert_eq!(c.frame(facts(false), Some(&layout)), enter_commands(compact));
+        assert_eq!(settle(&mut c, facts(false), Some(&layout), t), enter_commands(compact));
 
         // Focus regained, but the resize back to 960x460 hasn't landed: this frame's
         // content_size still reads as the compact size.
         let blip = WindowFacts { focused: true, maximized: false, fullscreen: false, content_size: compact };
-        assert_eq!(c.frame(blip, Some(&layout)), leave_commands(Vec2::new(960.0, 460.0)));
+        assert_eq!(c.frame(blip, Some(&layout), t + GRACE), leave_commands(Vec2::new(960.0, 460.0)));
 
-        // Lost again immediately: still no full frame has been drawn, so content_size is still
+        // Lost again: still no full frame has been drawn, so content_size is still
         // compact-sized here too.
         let still_small = WindowFacts { focused: false, maximized: false, fullscreen: false, content_size: compact };
-        assert_eq!(c.frame(still_small, Some(&layout)), enter_commands(compact));
+        assert_eq!(settle(&mut c, still_small, Some(&layout), t + GRACE), enter_commands(compact));
 
         // Regaining focus for real must restore the original full size, not the compact one.
-        assert_eq!(c.frame(facts(true), Some(&layout)), leave_commands(Vec2::new(960.0, 460.0)));
+        assert_eq!(c.frame(facts(true), Some(&layout), t + 2 * GRACE), leave_commands(Vec2::new(960.0, 460.0)));
     }
 
     /// A replug while unfocused must not enter compact with a stale key/window size from before
@@ -380,17 +469,18 @@ mod tests {
     #[test]
     fn full_size_is_cleared_when_the_keyboard_goes_away() {
         let layout = lily58();
+        let t = Instant::now();
         let mut c = Compact { enabled: true, ..Default::default() };
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
 
         // Keyboard unplugged.
-        assert_eq!(c.frame(facts(true), None), vec![]);
+        assert_eq!(c.frame(facts(true), None, t), vec![]);
 
         // Replugged and unfocused before any full frame has recorded a fresh size.
-        assert_eq!(c.frame(facts(false), Some(&layout)), vec![], "no enter commands without a fresh record_full_unit");
+        assert_eq!(settle(&mut c, facts(false), Some(&layout), t), vec![], "no enter commands without a fresh record_full_unit");
 
         c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
-        assert_eq!(c.frame(facts(false), Some(&layout)), enter_commands(window_size(&layout, 40.0)));
+        assert_eq!(c.frame(facts(false), Some(&layout), t + 2 * GRACE), enter_commands(window_size(&layout, 40.0)));
     }
 
     #[test]
