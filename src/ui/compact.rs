@@ -16,6 +16,10 @@ use crate::state::AppState;
 
 /// Space around the keys in compact mode, so their outlines aren't clipped. Points.
 pub const MARGIN: f32 = 8.0;
+/// The viewport's minimum inner size in full mode. Below this, some X11 WMs clamp the window
+/// instead of shrinking it (leaving a transparent strip) and some Wayland compositors push back;
+/// compact mode lifts the floor to `Vec2::ZERO` while it's in effect.
+pub const FULL_MIN_SIZE: Vec2 = Vec2::new(480.0, 240.0);
 /// Label box, in key units.
 const LABEL_W: f32 = 2.4;
 const LABEL_H: f32 = 0.6;
@@ -74,11 +78,21 @@ pub fn window_size(layout: &Layout, unit: f32) -> Vec2 {
 }
 
 pub fn enter_commands(size: Vec2) -> Vec<ViewportCommand> {
-    vec![ViewportCommand::Decorations(false), ViewportCommand::MousePassthrough(true), ViewportCommand::InnerSize(size)]
+    vec![
+        ViewportCommand::MinInnerSize(Vec2::ZERO),
+        ViewportCommand::Decorations(false),
+        ViewportCommand::MousePassthrough(true),
+        ViewportCommand::InnerSize(size),
+    ]
 }
 
 pub fn leave_commands(size: Vec2) -> Vec<ViewportCommand> {
-    vec![ViewportCommand::Decorations(true), ViewportCommand::MousePassthrough(false), ViewportCommand::InnerSize(size)]
+    vec![
+        ViewportCommand::MinInnerSize(FULL_MIN_SIZE),
+        ViewportCommand::Decorations(true),
+        ViewportCommand::MousePassthrough(false),
+        ViewportCommand::InnerSize(size),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,8 +106,11 @@ struct Frozen {
 pub struct Compact {
     /// The status-bar checkbox.
     pub enabled: bool,
-    /// Key size on the last full frame.
-    full_unit: Option<f32>,
+    /// Key size and content size on the last full frame that wasn't still catching up to a
+    /// resize back from compact. The restore size on entering compact comes from here, not from
+    /// this frame's `WindowFacts::content_size`, which can still read as the compact size if
+    /// focus is lost again before the resize back has landed.
+    full: Option<(f32, Vec2)>,
     /// The size last asked for on entering compact; full frames still at this size are the
     /// resize back not having landed yet, and mustn't be recorded as the full key size.
     compact_size: Option<Vec2>,
@@ -103,13 +120,18 @@ pub struct Compact {
 
 impl Compact {
     /// Decides this frame's mode and returns the commands for a change, if any. The size to
-    /// restore is read here, once, on entering; never while a resize may be in flight.
+    /// restore comes from the last `record_full_unit` call, read here, never from a resize that
+    /// may still be in flight.
     pub fn frame(&mut self, facts: WindowFacts, layout: Option<&Layout>) -> Vec<ViewportCommand> {
         let want = should_be_compact(self.enabled, facts.focused, layout.is_some(), facts.maximized, facts.fullscreen);
-        match (self.frozen, want, layout, self.full_unit) {
-            (None, true, Some(layout), Some(unit)) => {
+        if layout.is_none() {
+            // A replug must not enter compact with a stale size from before the keyboard left.
+            self.full = None;
+        }
+        match (self.frozen, want, layout, self.full) {
+            (None, true, Some(layout), Some((unit, full_size))) => {
                 let size = window_size(layout, unit);
-                self.frozen = Some(Frozen { unit, restore: facts.content_size });
+                self.frozen = Some(Frozen { unit, restore: full_size });
                 self.compact_size = Some(size);
                 enter_commands(size)
             }
@@ -121,11 +143,12 @@ impl Compact {
         }
     }
 
-    /// Called on each full frame with the key size `keyboard::show` used.
+    /// Called on each full frame with the key size `keyboard::show` used and the window's
+    /// content size.
     pub fn record_full_unit(&mut self, unit: f32, content_size: Vec2) {
         let still_small = self.compact_size.is_some_and(|s| (s - content_size).length() < 1.0);
         if !still_small {
-            self.full_unit = Some(unit);
+            self.full = Some((unit, content_size));
         }
     }
 
@@ -261,11 +284,13 @@ mod tests {
     fn mode_change_commands() {
         let size = Vec2::new(676.0, 246.0);
         assert_eq!(enter_commands(size), vec![
+            ViewportCommand::MinInnerSize(Vec2::ZERO),
             ViewportCommand::Decorations(false),
             ViewportCommand::MousePassthrough(true),
             ViewportCommand::InnerSize(size),
         ]);
         assert_eq!(leave_commands(size), vec![
+            ViewportCommand::MinInnerSize(FULL_MIN_SIZE),
             ViewportCommand::Decorations(true),
             ViewportCommand::MousePassthrough(false),
             ViewportCommand::InnerSize(size),
@@ -321,6 +346,51 @@ mod tests {
         c.record_full_unit(38.5, compact);
         c.frame(facts(false), Some(&layout));
         assert_eq!(c.frozen_unit(), Some(40.0), "the key size didn't drift");
+    }
+
+    /// If the window leaves compact and loses focus again before the resize back has landed,
+    /// `content_size` still reads as the compact size. The restore size must come from the last
+    /// `record_full_unit` call, not from that stale `content_size`, or the full window stays
+    /// small on every later round trip.
+    #[test]
+    fn restore_size_survives_a_focus_blip_before_the_resize_lands() {
+        let layout = lily58();
+        let mut c = Compact { enabled: true, ..Default::default() };
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+        let compact = window_size(&layout, 40.0);
+
+        assert_eq!(c.frame(facts(false), Some(&layout)), enter_commands(compact));
+
+        // Focus regained, but the resize back to 960x460 hasn't landed: this frame's
+        // content_size still reads as the compact size.
+        let blip = WindowFacts { focused: true, maximized: false, fullscreen: false, content_size: compact };
+        assert_eq!(c.frame(blip, Some(&layout)), leave_commands(Vec2::new(960.0, 460.0)));
+
+        // Lost again immediately: still no full frame has been drawn, so content_size is still
+        // compact-sized here too.
+        let still_small = WindowFacts { focused: false, maximized: false, fullscreen: false, content_size: compact };
+        assert_eq!(c.frame(still_small, Some(&layout)), enter_commands(compact));
+
+        // Regaining focus for real must restore the original full size, not the compact one.
+        assert_eq!(c.frame(facts(true), Some(&layout)), leave_commands(Vec2::new(960.0, 460.0)));
+    }
+
+    /// A replug while unfocused must not enter compact with a stale key/window size from before
+    /// the keyboard went away.
+    #[test]
+    fn full_size_is_cleared_when_the_keyboard_goes_away() {
+        let layout = lily58();
+        let mut c = Compact { enabled: true, ..Default::default() };
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+
+        // Keyboard unplugged.
+        assert_eq!(c.frame(facts(true), None), vec![]);
+
+        // Replugged and unfocused before any full frame has recorded a fresh size.
+        assert_eq!(c.frame(facts(false), Some(&layout)), vec![], "no enter commands without a fresh record_full_unit");
+
+        c.record_full_unit(40.0, Vec2::new(960.0, 460.0));
+        assert_eq!(c.frame(facts(false), Some(&layout)), enter_commands(window_size(&layout, 40.0)));
     }
 
     #[test]

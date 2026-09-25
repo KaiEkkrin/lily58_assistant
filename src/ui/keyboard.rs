@@ -253,8 +253,8 @@ mod tests {
     #[test]
     fn fill_reports_the_key_size_it_chose() {
         let (unit, avail) = run(&lily58_state(), Fit::Fill);
-        // Lily58 spans 16.5 × 5.75 key units; Fill leaves 24pt around the keys.
-        let expected = ((avail.x - 24.0) / 16.5).min((avail.y - 24.0) / 5.75).max(8.0);
+        // Lily58 spans 16.5 × 5.75 key units; Fill leaves FILL_PADDING around the keys.
+        let expected = ((avail.x - FILL_PADDING) / 16.5).min((avail.y - FILL_PADDING) / 5.75).max(8.0);
         let unit = unit.expect("a keyboard is loaded");
         assert!((unit - expected).abs() < 1e-3, "{unit} vs {expected}");
     }
@@ -263,6 +263,41 @@ mod tests {
     fn fixed_uses_the_key_size_it_is_given() {
         let (unit, _) = run(&lily58_state(), Fit::Fixed { unit: 37.0, margin: 8.0 });
         assert_eq!(unit, Some(37.0));
+    }
+
+    /// Compact labels are placed assuming the keys start at the ui's top-left plus the margin
+    /// (`Fit::Fixed`'s contract), not centred the way `Fit::Fill` draws them. Pin the anchor by
+    /// checking where the key shapes actually land.
+    #[test]
+    fn fixed_anchors_keys_at_the_top_left_plus_margin() {
+        let state = lily58_state();
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 460.0))),
+            ..Default::default()
+        };
+        let (unit, margin) = (37.0, 8.0);
+        let mut ui_min = Pos2::ZERO;
+        let mut output = ctx.run_ui(raw, |ui| {
+            ui_min = ui.cursor().min;
+            show(ui, &state, Instant::now(), View::default(), Fit::Fixed { unit, margin });
+        });
+
+        let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
+        for clipped in &output.shapes {
+            if let Shape::Path(path) = &clipped.shape {
+                for p in &path.points {
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                }
+            }
+        }
+        output.textures_delta.clear();
+
+        // Every key is inset by GAP before being placed, so the closest corner lands GAP*unit
+        // beyond the margin, not at a centred origin.
+        let expected = ui_min + Vec2::splat(margin + GAP * unit);
+        assert!((min - expected).length() < 1.0, "{min:?} vs {expected:?} (top-left anchored, not centred)");
     }
 
     #[test]

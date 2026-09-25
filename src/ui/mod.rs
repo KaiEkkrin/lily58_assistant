@@ -81,7 +81,7 @@ pub fn run() -> eframe::Result {
             .with_title("Lily58 Assistant")
             .with_app_id("lily58-assistant")
             .with_inner_size([960.0, 460.0])
-            .with_min_inner_size([480.0, 240.0])
+            .with_min_inner_size(compact::FULL_MIN_SIZE)
             .with_transparent(true),
         ..Default::default()
     };
@@ -809,7 +809,7 @@ mod tests {
         };
         ctx.run_ui(raw, |ui| app.central(ui, Instant::now())).textures_delta.clear();
         let commands = app.compact_frame(unfocused());
-        assert_eq!(commands.first(), Some(&egui::ViewportCommand::Decorations(false)));
+        assert!(commands.contains(&egui::ViewportCommand::Decorations(false)));
         assert!(app.compact.frozen_unit().is_some_and(|u| u > 8.0));
     }
 }
