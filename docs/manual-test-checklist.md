@@ -59,6 +59,16 @@ Run on each PC after changing input, device or UI code. Close Vial unless a step
 - [ ] Compact is transparent on this PC's GPU/driver (not a black box).
 - [ ] Focus, click away and refocus in quick succession several times: the full window always returns at its previous size.
 
+## Fade when idle (run on GNOME and KDE)
+- [ ] **Fade when idle** is on at startup, and greyed out while **Compact when unfocused** is off.
+- [ ] Compact with all-windows tracking: after about 2.5 s without a key, the keys fade over about half a second to faint outlines and the labels disappear; text underneath is readable.
+- [ ] Typing in another window brings it straight back, and it stays while typing.
+- [ ] Holding a key (e.g. Shift) keeps it solid; it fades about 2.5 s after letting go.
+- [ ] With live layers: holding LOWER or RAISE alone brings it back, showing that layer, until released.
+- [ ] Focused-only tier (no udev rule, locked): it never fades.
+- [ ] Faded, the window still shows up in Alt+Tab and the Overview, and the outlines are findable on both light and dark backgrounds.
+- [ ] Refocusing while faded brings back the full, opaque window.
+
 ## Robustness
 - [ ] Opening Vial while the assistant runs shows "paused: vial (…) has the keyboard open", and Vial works normally. Closing Vial makes the assistant reconnect.
 - [ ] Remapping a key in Vial, then closing Vial, shows the new label after the reconnect.

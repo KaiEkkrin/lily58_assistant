@@ -45,6 +45,8 @@ pub struct AppState {
     pub last: Option<LastKey>,
     pub matrix_active: bool,
     pub evdev_active: bool,
+    /// When a key last went down or up, from any tier.
+    pub last_activity: Option<Instant>,
     host: HostLayout,
     tracker: LayerTracker,
     matrix_held: BTreeSet<(u8, u8)>,
@@ -61,6 +63,7 @@ impl AppState {
             last: None,
             matrix_active: false,
             evdev_active: false,
+            last_activity: None,
             host,
             tracker: LayerTracker::new(tri, always_tri),
             matrix_held: BTreeSet::new(),
@@ -133,7 +136,14 @@ impl AppState {
         }
     }
 
+    /// Something is held down or a layer other than 0 is active. Counts OS keys the keymap
+    /// couldn't place, which `held_positions` leaves out.
+    pub fn busy(&self, now: Instant) -> bool {
+        !self.matrix_held.is_empty() || !self.os_held.is_empty() || self.active_layer(now) != 0
+    }
+
     pub fn matrix_changed(&mut self, pressed: &[(u8, u8)], released: &[(u8, u8)], now: Instant) {
+        self.last_activity = Some(now);
         for &(row, col) in released {
             self.matrix_held.remove(&(row, col));
             self.tracker.release(row, col, now);
@@ -149,6 +159,7 @@ impl AppState {
     }
 
     pub fn os_key(&mut self, key: &OsKey, now: Instant) {
+        self.last_activity = Some(now);
         if key.usages.iter().any(|&u| u == 0xE1 || u == 0xE5) {
             self.os_shift = key.pressed;
         }
@@ -242,6 +253,35 @@ mod tests {
         s.matrix_changed(&[(0, 0)], &[], now);
         assert_eq!(s.last.as_ref().unwrap().text.as_deref(), Some("A"));
         assert_eq!(s.held_positions(), BTreeSet::from([(0, 0), (1, 2)]));
+    }
+
+    #[test]
+    fn key_events_record_activity_and_held_keys_or_a_layer_keep_it_busy() {
+        let mut s = state();
+        let t = Instant::now();
+        assert_eq!(s.last_activity, None);
+        assert!(!s.busy(t));
+
+        s.os_key(&os("A", &[0x04], true), t);
+        assert_eq!(s.last_activity, Some(t));
+        assert!(s.busy(t), "a key is down");
+        let t2 = t + std::time::Duration::from_millis(50);
+        s.os_key(&os("A", &[0x04], false), t2);
+        assert_eq!(s.last_activity, Some(t2), "a release counts too");
+        assert!(!s.busy(t2));
+
+        // An OS key with no place on the keymap is still held.
+        s.os_key(&os("F13", &[0x68], true), t2);
+        assert!(s.busy(t2));
+        s.os_key(&os("F13", &[0x68], false), t2);
+
+        s.set_matrix_active(true);
+        let t3 = t2 + std::time::Duration::from_millis(50);
+        s.matrix_changed(&[(1, 0)], &[], t3); // MO(1)
+        assert_eq!(s.last_activity, Some(t3));
+        assert!(s.busy(t3));
+        s.matrix_changed(&[], &[(1, 0)], t3);
+        assert!(!s.busy(t3));
     }
 
     #[test]

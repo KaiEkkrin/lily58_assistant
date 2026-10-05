@@ -31,6 +31,13 @@ const LABEL_ROW: f32 = 0.8;
 /// and focus comes back when the drag ends.
 pub const GRACE: Duration = Duration::from_secs(1);
 
+/// How long compact mode waits, with nothing held and no key pressed, before fading to a ghost.
+pub const IDLE: Duration = Duration::from_millis(2500);
+/// How long the fade to a ghost takes: slow, so it isn't a distraction.
+pub const FADE_OUT: Duration = Duration::from_millis(600);
+/// How long coming back takes: fast, so it's there by the time you look.
+pub const FADE_IN: Duration = Duration::from_millis(100);
+
 /// What the window looks like this frame, gathered from egui by the caller.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowFacts {
@@ -182,6 +189,57 @@ impl Compact {
     }
 }
 
+/// Fade-when-idle: while compact, the picture fades to just faint key outlines once the keyboard
+/// has been left alone for `IDLE`, so what's underneath can be read, and comes back on any key.
+/// Drawn by us at lower alpha on the already-transparent window, so it needs nothing from the
+/// desktop, and the window stays in Alt+Tab and the Overview.
+#[derive(Debug)]
+pub struct Fade {
+    /// The status-bar checkbox.
+    pub enabled: bool,
+    /// 0 is the normal picture, 1 the ghost.
+    ghost: f32,
+    /// When fading last became possible: the wait counts from here at the earliest, so a key
+    /// pressed long before going compact doesn't make it fade straight away.
+    since: Option<Instant>,
+    last_step: Option<Instant>,
+    /// The idle wait had passed at the last step.
+    idle: bool,
+}
+
+impl Default for Fade {
+    fn default() -> Self {
+        Self { enabled: true, ghost: 0.0, since: None, last_step: None, idle: false }
+    }
+}
+
+impl Fade {
+    /// Advances to `now` and returns how far to fade (0 normal, 1 ghost). `can_fade` is false
+    /// outside compact, and in the focused-only tier, which sees no keys while compact and so
+    /// could never bring it back. `busy` is a key held or a layer above 0.
+    pub fn step(&mut self, now: Instant, can_fade: bool, busy: bool, last_activity: Option<Instant>) -> f32 {
+        if !(self.enabled && can_fade) {
+            *self = Self { enabled: self.enabled, ..Default::default() };
+            return 0.0;
+        }
+        let since = *self.since.get_or_insert(now);
+        let quiet_from = last_activity.map_or(since, |a| a.max(since));
+        let quiet = now.saturating_duration_since(quiet_from);
+        self.idle = !busy && quiet >= IDLE;
+        // The fade out follows the clock; the fade in eases from wherever it had got to.
+        let wanted = if self.idle { ((quiet - IDLE).as_secs_f32() / FADE_OUT.as_secs_f32()).min(1.0) } else { 0.0 };
+        let dt = self.last_step.map_or(Duration::ZERO, |l| now.saturating_duration_since(l));
+        self.last_step = Some(now);
+        self.ghost = if wanted >= self.ghost { wanted } else { (self.ghost - dt.as_secs_f32() / FADE_IN.as_secs_f32()).max(wanted) };
+        self.ghost
+    }
+
+    /// Mid-fade, either way, so frames are wanted at a smooth rate.
+    pub fn animating(&self) -> bool {
+        if self.idle { self.ghost < 1.0 } else { self.ghost > 0.0 }
+    }
+}
+
 /// Background behind each label, so it reads over whatever is underneath.
 const LABEL_BG: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 215);
 
@@ -189,8 +247,9 @@ pub fn layer_text(state: &AppState, now: Instant) -> String {
     if state.matrix_active { format!("Layer {}", state.active_layer(now)) } else { "Layer ?".into() }
 }
 
-/// Draws the compact view: keys at the frozen size, and the last-key and layer labels.
-pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
+/// Draws the compact view: keys at the frozen size, and the last-key and layer labels, `ghost`
+/// of the way faded (see `Fade`).
+pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32, ghost: f32) {
     let Some(layout) = &app.state.layout else { return };
     let top_left = ui.max_rect().min + Vec2::splat(MARGIN);
     let _ = keyboard::show(ui, &app.state, now, keyboard::View {
@@ -198,6 +257,7 @@ pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
         fingers: app.finger_colours_shown(),
         hint: app.tutor.hint(),
         translucent: true,
+        ghost,
     }, keyboard::Fit::Fixed { unit, margin: MARGIN });
 
     let (min_x, min_y, ..) = layout.bounds();
@@ -205,6 +265,10 @@ pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
     let slots = label_slots(layout);
     let last = app.state.last.as_ref().map(status::last_key_text).unwrap_or_default();
     let painter = ui.painter();
+    if ghost >= 1.0 {
+        return; // labels fade out entirely
+    }
+    let (label_bg, label_text) = (LABEL_BG.gamma_multiply(1.0 - ghost), Color32::WHITE.gamma_multiply(1.0 - ghost));
     for (slot, text, align) in [(slots.left, last, Align2::LEFT_CENTER), (slots.right, layer_text(&app.state, now), Align2::RIGHT_CENTER)] {
         if text.is_empty() {
             continue;
@@ -215,15 +279,15 @@ pub fn show(ui: &mut egui::Ui, app: &App, now: Instant, unit: f32) {
         let galley = painter.layout_no_wrap(text.clone(), FontId::monospace(size), Color32::WHITE);
         let pad = 6.0;
         let fit = ((rect.width() - 2.0 * pad) / galley.size().x).min(1.0);
-        let galley = painter.layout_no_wrap(text, FontId::monospace(size * fit), Color32::WHITE);
+        let galley = painter.layout_no_wrap(text, FontId::monospace(size * fit), label_text);
         let bg_w = galley.size().x + 2.0 * pad;
         let bg = if align == Align2::LEFT_CENTER {
             Rect::from_min_max(rect.min, pos2(rect.min.x + bg_w, rect.max.y))
         } else {
             Rect::from_min_max(pos2(rect.max.x - bg_w, rect.min.y), rect.max)
         };
-        painter.rect_filled(bg, CornerRadius::same(keyboard::corner_radius(unit).round() as u8), LABEL_BG);
-        painter.galley(pos2(bg.min.x + pad, bg.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+        painter.rect_filled(bg, CornerRadius::same(keyboard::corner_radius(unit).round() as u8), label_bg);
+        painter.galley(pos2(bg.min.x + pad, bg.center().y - galley.size().y / 2.0), galley, label_text);
     }
 }
 
@@ -295,6 +359,72 @@ mod tests {
         assert!(!overlaps_a_key(&layout, slots.left));
         assert!(!overlaps_a_key(&layout, slots.right));
         assert!(slots.left.top() >= 2.0, "below the keys: {:?}", slots.left);
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn fades_to_a_ghost_after_the_idle_wait_and_back_quickly_on_a_key() {
+        let t = Instant::now();
+        let mut f = Fade::default();
+        assert!(f.enabled, "on by default");
+        assert_eq!(f.step(t, true, false, None), 0.0);
+        assert_eq!(f.step(t + IDLE - ms(1), true, false, None), 0.0, "still waiting");
+        assert!(!f.animating());
+        assert_eq!(f.step(t + IDLE, true, false, None), 0.0);
+        assert!(f.animating(), "the fade has started");
+        let half = f.step(t + IDLE + FADE_OUT / 2, true, false, None);
+        assert!((half - 0.5).abs() < 1e-3, "{half}");
+        assert_eq!(f.step(t + IDLE + FADE_OUT, true, false, None), 1.0);
+        assert!(!f.animating());
+
+        let key = t + IDLE * 2;
+        let back = f.step(key, true, false, Some(key));
+        assert!(back < 1.0);
+        assert_eq!(f.step(key + FADE_IN, true, false, Some(key)), 0.0, "solid again within FADE_IN");
+        assert_eq!(f.step(key + IDLE - ms(1), true, false, Some(key)), 0.0, "and the wait starts over");
+    }
+
+    #[test]
+    fn holding_anything_keeps_it_solid_and_the_wait_starts_on_release() {
+        let t = Instant::now();
+        let mut f = Fade::default();
+        f.step(t, true, true, Some(t));
+        assert_eq!(f.step(t + IDLE * 3, true, true, Some(t)), 0.0);
+        assert!(!f.animating());
+        let release = t + IDLE * 3;
+        assert_eq!(f.step(release + IDLE - ms(1), true, false, Some(release)), 0.0);
+        f.step(release + IDLE, true, false, Some(release));
+        assert_eq!(f.step(release + IDLE + FADE_OUT, true, false, Some(release)), 1.0);
+    }
+
+    #[test]
+    fn the_wait_counts_from_going_compact_not_from_a_stale_key() {
+        let t = Instant::now();
+        let mut f = Fade::default();
+        let entered = t + IDLE * 10;
+        assert_eq!(f.step(entered, true, false, Some(t)), 0.0);
+        assert_eq!(f.step(entered + IDLE - ms(1), true, false, Some(t)), 0.0);
+    }
+
+    #[test]
+    fn leaving_compact_or_switching_off_resets_to_solid() {
+        let t = Instant::now();
+        let mut f = Fade::default();
+        f.step(t, true, false, None);
+        f.step(t + IDLE, true, false, None);
+        assert_eq!(f.step(t + IDLE + FADE_OUT, true, false, None), 1.0);
+        let out = t + IDLE + FADE_OUT;
+        assert_eq!(f.step(out, false, false, None), 0.0, "can't fade (full mode, or the focused-only tier)");
+        assert!(!f.animating());
+        assert_eq!(f.step(out + IDLE - ms(1), true, false, None), 0.0, "back in compact: a fresh wait");
+
+        let mut f = Fade { enabled: false, ..Default::default() };
+        f.step(t, true, false, None);
+        assert_eq!(f.step(t + IDLE * 2, true, false, None), 0.0);
+        assert!(!f.animating());
     }
 
     #[test]

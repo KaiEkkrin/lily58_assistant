@@ -72,6 +72,12 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App, now: Instant) {
             "When this window loses focus, shrink it to just the keys, see-through and click-through. \
              Switch back with Alt+Tab, the taskbar or the Overview.",
         );
+        ui.add_enabled(app.compact.enabled, egui::Checkbox::new(&mut app.fade.enabled, "Fade when idle"))
+            .on_hover_text(
+                "While compact, fade to faint key outlines when the keyboard is left alone, and come back on any key. \
+                 Needs all-windows tracking or live layers; only live layers see LOWER or RAISE held on their own.",
+            )
+            .on_disabled_hover_text("Turn on Compact when unfocused first.");
         ui.separator();
         if ui.button("Reload (Ctrl+R)").clicked() {
             app.reload();

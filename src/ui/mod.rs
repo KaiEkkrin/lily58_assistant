@@ -17,7 +17,7 @@ use crate::device::{self, DeviceCommand, DeviceEvent, SystemConnector};
 use crate::input::InputMsg;
 use crate::input::evdev::{self as evdev_input, EvdevStatus};
 use crate::input::focused::{self, FocusedInput};
-use crate::state::AppState;
+use crate::state::{AppState, Tier};
 use crate::tutor::{self, Availability, Session};
 use crate::tutor::drills;
 
@@ -59,6 +59,8 @@ pub struct App {
     finger_colours: bool,
     /// Compact-when-unfocused: the checkbox, and while compact, the frozen key size.
     compact: compact::Compact,
+    /// Fade-when-idle while compact: the checkbox and how far faded.
+    fade: compact::Fade,
     tutor: Session,
     /// Everything typed into the window since the last `logic` call, copied in
     /// `raw_input_hook` before egui sees it and drained (applied to `state`) in `logic`, which
@@ -121,6 +123,7 @@ impl App {
             show_hints: false,
             finger_colours: true,
             compact: compact::Compact::default(),
+            fade: compact::Fade::default(),
             tutor: Session::new(),
             typed: Vec::new(),
             typed_seen: Vec::new(),
@@ -345,6 +348,7 @@ impl App {
                 fingers: self.finger_colours_shown(),
                 hint: self.tutor.hint(),
                 translucent: false,
+                ghost: 0.0,
             }, keyboard::Fit::Fill);
             if let Some(unit) = unit {
                 self.compact.record_full_unit(unit, ui.ctx().content_rect().size());
@@ -459,9 +463,14 @@ impl eframe::App for App {
         if let Some(wait) = self.compact.wake_in(now) {
             ctx.request_repaint_after(wait);
         }
-        if let Some(unit) = self.compact.frozen_unit() {
-            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| compact::show(ui, self, now, unit));
-            ctx.request_repaint_after(Duration::from_millis(100));
+        let frozen = self.compact.frozen_unit();
+        let can_fade = frozen.is_some() && self.state.tier() != Tier::Focused;
+        let ghost = self.fade.step(now, can_fade, self.state.busy(now), self.state.last_activity);
+        if let Some(unit) = frozen {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| compact::show(ui, self, now, unit, ghost));
+            // The 100 ms tick also notices the idle wait running out; a fade needs smooth frames.
+            let tick = if self.fade.animating() { Duration::from_millis(16) } else { Duration::from_millis(100) };
+            ctx.request_repaint_after(tick);
             return;
         }
 
