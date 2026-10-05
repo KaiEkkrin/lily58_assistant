@@ -110,6 +110,8 @@ The assistant doesn't do this itself, because Wayland offers no portable way. Us
 
 To cover less of what's underneath, tick **Compact when unfocused** in the status bar. When you click another window, after about a second the assistant shrinks to just the keys (at the same size), with the last key and layer beneath them, on a see-through background that lets clicks through to the window below. It comes back in full when focused again. Because clicks pass through it, switch back with the keyboard or desktop: Alt+Tab, the taskbar, or the Overview. The setting isn't saved. It has no effect while the window is maximized or fullscreen.
 
+With **Fade when idle** also ticked (it is by default), compact mode fades to faint key outlines once the keyboard has been left alone for a couple of seconds, so you can read what's underneath. It's back the moment you press a key, and stays while any key is held or a layer is active. It needs all-windows tracking or live layers to see your keys while unfocused, so it never fades with neither. Holding LOWER or RAISE on its own brings it back only with live layers: without them, layer keys are invisible.
+
 ## Known limits
 
 - Layer logic compiled into the firmware isn't visible over Vial; `tri_layer` covers the common case.

@@ -22,6 +22,8 @@ const GAP: f32 = 0.05;
 const FINGER_STROKE: f32 = 2.0;
 /// Key fill alpha in compact mode, so what's underneath shows faintly through.
 const TRANSLUCENT_ALPHA: f32 = 0.9;
+/// Key outline alpha in a full ghost (compact mode, idle), the only part still drawn.
+const GHOST_OUTLINE_ALPHA: f32 = 0.5;
 /// Space `Fit::Fill` leaves around the keys, in total per axis. Points.
 const FILL_PADDING: f32 = 24.0;
 /// Segments per rounded key corner.
@@ -45,6 +47,16 @@ pub struct View<'a> {
     pub hint: Option<&'a KeyPath>,
     /// Draw key fills slightly see-through (compact mode).
     pub translucent: bool,
+    /// How far faded to a ghost of faint outlines: 0 normal, 1 ghost (compact mode, idle).
+    pub ghost: f32,
+}
+
+/// Fill, text and outline colours `ghost` of the way to a ghost: fill and text fade out
+/// entirely, since they're what hides what's underneath, and the outline only to
+/// `GHOST_OUTLINE_ALPHA`, so the keyboard can still be found.
+pub fn ghosted(fill: Color32, text: Color32, stroke: Color32, ghost: f32) -> (Color32, Color32, Color32) {
+    let keep = 1.0 - ghost;
+    (fill.gamma_multiply(keep), text.gamma_multiply(keep), stroke.gamma_multiply(1.0 - ghost * (1.0 - GHOST_OUTLINE_ALPHA)))
 }
 
 /// Ten colours: four fingers and a thumb on each hand. A mirrored five would be easier on the
@@ -149,6 +161,8 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, now: Instant, view: View<'_>, f
             Some(spot) => Stroke::new(FINGER_STROKE, finger_colour(spot.hand, spot.finger)),
             None => Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
         };
+        let (fill, text_color, stroke_color) = ghosted(fill, text_color, stroke.color, view.ghost);
+        let stroke = Stroke::new(stroke.width, stroke_color);
         let inner = KeyGeom { x: key.x + GAP, y: key.y + GAP, w: key.w - 2.0 * GAP, h: key.h - 2.0 * GAP, ..key.clone() };
         let points = rounded(inner.corners().map(to_screen), corner_radius(unit));
         painter.add(Shape::convex_polygon(points, fill, stroke));
@@ -282,6 +296,19 @@ mod tests {
         assert!(!view.fingers);
         assert!(view.hint.is_none());
         assert!(!view.translucent);
+        assert_eq!(view.ghost, 0.0);
+    }
+
+    #[test]
+    fn a_ghost_keeps_only_faint_outlines() {
+        let (fill, text, stroke) = (Color32::from_gray(60), Color32::WHITE, Color32::from_rgb(224, 108, 117));
+        assert_eq!(ghosted(fill, text, stroke, 0.0), (fill, text, stroke));
+        let (f, t, s) = ghosted(fill, text, stroke, 1.0);
+        assert_eq!((f, t), (Color32::TRANSPARENT, Color32::TRANSPARENT));
+        assert_eq!(s, stroke.gamma_multiply(GHOST_OUTLINE_ALPHA));
+        let (f, _, s) = ghosted(fill, text, stroke, 0.5);
+        assert_eq!(f, fill.gamma_multiply(0.5));
+        assert_eq!(s, stroke.gamma_multiply(1.0 - 0.5 * (1.0 - GHOST_OUTLINE_ALPHA)));
     }
 
     fn lily58_state() -> AppState {
